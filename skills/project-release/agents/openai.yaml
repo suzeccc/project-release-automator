@@ -1,0 +1,4 @@
+interface:
+  display_name: "项目自动发布"
+  short_description: "配置驱动地完成项目版本整理、本地构建和 GitHub 发布"
+  default_prompt: "Use $project-release to package and publish the current Git project as v1.2.3."
