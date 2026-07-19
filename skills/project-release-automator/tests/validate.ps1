@@ -34,7 +34,7 @@ function Remove-TestDirectory([string]$Path) {
   $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
   if (
     -not $resolved.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -or
-    [IO.Path]::GetFileName($resolved) -notlike "project-release-*"
+    [IO.Path]::GetFileName($resolved) -notlike "project-release-automator-*"
   ) {
     throw "Refusing to remove unexpected test path: $resolved"
   }
@@ -97,7 +97,7 @@ Assert-Throws {
   Assert-ReleaseNotes -ReleaseNotes "## Changes`n`n- one" -Heading "## Changes" -MinItems 2 -MaxItems 6
 } "2 to 6" "too few release-note items must fail"
 
-$parallelRoot = Join-Path ([IO.Path]::GetTempPath()) ("project-release-parallel-" + [guid]::NewGuid().ToString("N"))
+$parallelRoot = Join-Path ([IO.Path]::GetTempPath()) ("project-release-automator-parallel-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $parallelRoot | Out-Null
 $shell = (Get-Process -Id $PID).Path
 try {
@@ -138,8 +138,8 @@ finally {
   Remove-TestDirectory $parallelRoot
 }
 
-$planRoot = Join-Path ([IO.Path]::GetTempPath()) ("project-release-plan-" + [guid]::NewGuid().ToString("N"))
-$bareRoot = Join-Path ([IO.Path]::GetTempPath()) ("project-release-remote-" + [guid]::NewGuid().ToString("N"))
+$planRoot = Join-Path ([IO.Path]::GetTempPath()) ("project-release-automator-plan-" + [guid]::NewGuid().ToString("N"))
+$bareRoot = Join-Path ([IO.Path]::GetTempPath()) ("project-release-automator-remote-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $planRoot | Out-Null
 New-Item -ItemType Directory -Path $bareRoot | Out-Null
 try {
@@ -191,7 +191,7 @@ try {
     [Text.UTF8Encoding]::new($false)
   )
   & git -C $planRoot config user.name "Project Release Test"
-  & git -C $planRoot config user.email "project-release@example.invalid"
+  & git -C $planRoot config user.email "project-release-automator@example.invalid"
   & git -C $planRoot add package.json .codex-release.json
   & git -C $planRoot commit -m "Initial test project" | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "initial commit failed" }
@@ -240,7 +240,7 @@ if ($scriptSource -match 'gh.*run.*watch') {
   throw "script must use structured workflow polling"
 }
 
-Assert-Match $skill '^---[\s\S]*name: project-release' "skill name is not project-release"
+Assert-Match $skill '^---[\s\S]*name: project-release-automator' "skill name is not project-release-automator"
 Assert-Match $skill '\.codex-release\.json' "skill does not document repository config"
 Assert-Match $skill 'Plan[\s\S]*Prepare[\s\S]*Publish' "missing phase order"
 Assert-Match $skill '`--force`' "missing force-push guard"
@@ -248,4 +248,4 @@ Assert-Match $skill '`git add \.`' "missing staging guard"
 Assert-Match $referenceSource 'publish-draft' "config reference missing draft strategy"
 Assert-Match $referenceSource 'uploadAssets' "config reference missing upload assets"
 
-Write-Host "project-release contract passed"
+Write-Host "project-release-automator contract passed"

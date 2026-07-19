@@ -1,9 +1,9 @@
 ---
-name: project-release
-description: Use when packaging or formally releasing any local Git project after the user says 打包, 发布, or 正式发布 followed by a semantic version such as v1.2.3 or 1.2.3. Uses a repository-level .codex-release.json file to drive version updates, tests, builds, artifacts, tags, GitHub Actions, and GitHub Releases without hard-coded project paths.
+name: project-release-automator
+description: Automates packaging and formal releases for local Git projects. Use after the user says 打包, 发布, or 正式发布 followed by a semantic version such as v1.2.3 or 1.2.3. Uses a repository-level .codex-release.json file to drive version updates, tests, builds, artifacts, tags, GitHub Actions, and GitHub Releases without hard-coded project paths.
 ---
 
-# 项目自动发布
+# Project Release Automator
 
 把“打包 vX.Y.Z”视为用户对当前 Git 仓库执行本地构建、提交、推送、创建标签和正式发布的一次性授权。只执行 `.codex-release.json` 声明的项目步骤，不猜测或复用其他仓库的配置。
 
@@ -26,7 +26,7 @@ description: Use when packaging or formally releasing any local Git project afte
 运行：
 
 ```powershell
-& "$env:USERPROFILE\.codex\skills\project-release\scripts\release.ps1" `
+& "$env:USERPROFILE\.codex\skills\project-release-automator\scripts\release.ps1" `
   -Mode Plan -Version vX.Y.Z -Summary "一句中文总结。" `
   -RepositoryRoot "<仓库根目录>"
 ```
@@ -43,7 +43,7 @@ description: Use when packaging or formally releasing any local Git project afte
 使用同一版本和总结运行：
 
 ```powershell
-& "$env:USERPROFILE\.codex\skills\project-release\scripts\release.ps1" `
+& "$env:USERPROFILE\.codex\skills\project-release-automator\scripts\release.ps1" `
   -Mode Prepare -Version vX.Y.Z -Summary "一句中文总结。" `
   -RepositoryRoot "<仓库根目录>"
 ```
@@ -64,7 +64,7 @@ $releaseNotes = @"
 - 修复：第二项用户可感知重点。
 "@
 
-& "$env:USERPROFILE\.codex\skills\project-release\scripts\release.ps1" `
+& "$env:USERPROFILE\.codex\skills\project-release-automator\scripts\release.ps1" `
   -Mode Publish -Version vX.Y.Z -Summary "一句中文总结。" `
   -ReleaseNotes $releaseNotes `
   -RepositoryRoot "<仓库根目录>"
