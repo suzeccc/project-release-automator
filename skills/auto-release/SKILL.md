@@ -47,17 +47,17 @@ $invoke = "$env:USERPROFILE\.codex\skills\auto-release\scripts\invoke-release.ps
 用于本地测试，不修改版本，不提交、不推送：
 
 ```powershell
-& $invoke -Operation LocalBuild -RepositoryRoot "<仓库根目录>"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $invoke -Operation LocalBuild -RepositoryRoot "<仓库根目录>"
 ```
 
-执行配置中的本地测试和构建命令，保留构建工具的原始产物，并统一复制到 `<仓库根目录>/output/<项目名><扩展名>`。`output` 目录或目标文件不存在时自动创建，已存在时覆盖；文件名不带版本号。若源 EXE 或统一输出 EXE 正在运行，必须按完整路径强制终止对应进程并等待退出，再构建或覆盖；禁止因文件占用创建 `-2`、`-3` 等备用文件。多种扩展名分别保留，单次构建确有多个同扩展名产物时才追加序号。成功后把源文件指纹、统一产物路径和 SHA256 写入 `.git/auto-release/local-build.json`；该状态不进入 Git，并兼容读取旧目录中的收据。
+只校验本地版本源、构建命令和产物，不得因 GitHub 工作流缺少标签触发器而阻止 `LocalBuild`。执行配置中的本地测试和构建命令，保留构建工具的原始产物，并统一复制到 `<仓库根目录>/output/<项目名><扩展名>`。`output` 目录或目标文件不存在时自动创建，已存在时覆盖；文件名不带版本号。若源 EXE 或统一输出 EXE 正在运行，必须按完整路径强制终止对应进程并等待退出，再构建或覆盖；禁止因文件占用创建 `-2`、`-3` 等备用文件。多种扩展名分别保留，单次构建确有多个同扩展名产物时才追加序号。成功后把源文件指纹、统一产物路径和 SHA256 写入 `.git/auto-release/local-build.json`；该状态不进入 Git，并兼容读取旧目录中的收据。
 
 ### 2. CommitPush
 
 检查冲突和疑似密钥后，把更改区、暂存区、删除和未跟踪文件全部提交，并推送当前分支：
 
 ```powershell
-& $invoke -Operation CommitPush -Summary "一句中文总结" -RepositoryRoot "<仓库根目录>"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $invoke -Operation CommitPush -Summary "一句中文总结" -RepositoryRoot "<仓库根目录>"
 ```
 
 根据完整差异生成单行中文 `Summary`。本操作明确允许等价于 `git add -A` 的全量暂存，但仍遵守 `.gitignore`；发现 `.env`、私钥、凭据文件或密钥内容时停止并恢复原暂存区。远程领先或分叉时停止，不自动合并或变基。
@@ -74,7 +74,7 @@ $notes = @"
 - 修复：第二项用户可感知变化。
 "@
 
-& $invoke -Operation Release -Version vX.Y.Z -Summary "一句中文总结" `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $invoke -Operation Release -Version vX.Y.Z -Summary "一句中文总结" `
   -ReleaseNotes $notes -RepositoryRoot "<仓库根目录>"
 ```
 

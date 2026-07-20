@@ -243,7 +243,7 @@ function Get-WorkflowSettings($Config) {
   }
 }
 
-function Ensure-ReleaseAutomation([bool]$UpdateManaged) {
+function Ensure-ReleaseAutomation([string]$RequestedOperation) {
   if (-not (Test-Path -LiteralPath $setupScript -PathType Leaf)) { throw "Setup script missing: $setupScript" }
   $config = Read-ReleaseConfig
   if (-not $config) {
@@ -253,8 +253,14 @@ function Ensure-ReleaseAutomation([bool]$UpdateManaged) {
     return Read-ReleaseConfig
   }
 
+  if ($RequestedOperation -eq "LocalBuild") {
+    Write-Host "Local build uses repository config without validating GitHub release workflow"
+    return $config
+  }
+
+  $updateManaged = $RequestedOperation -eq "Release"
   $settings = Get-WorkflowSettings $config
-  if ($UpdateManaged -and $settings.Managed -and $settings.Generator -in @("auto-release", "project-release-automator")) {
+  if ($updateManaged -and $settings.Managed -and $settings.Generator -in @("auto-release", "project-release-automator")) {
     & $setupScript -Mode Generate -ProjectType $settings.ProjectType -RepositoryRoot $script:ResolvedRepositoryRoot `
       -ConfigPath $ConfigPath -WorkflowPath $settings.Path -ExistingWorkflowPolicy Stop
   }
@@ -437,7 +443,7 @@ if ($Operation -eq "CommitPush") {
   exit
 }
 
-$config = Ensure-ReleaseAutomation ($Operation -eq "Release")
+$config = Ensure-ReleaseAutomation $Operation
 
 if ($Operation -eq "LocalBuild") {
   & $releaseScript -Mode LocalBuild -RepositoryRoot $script:ResolvedRepositoryRoot -ConfigPath $ConfigPath

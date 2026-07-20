@@ -43,17 +43,17 @@ $setup = "$env:USERPROFILE\.codex\skills\auto-release\scripts\setup-project.ps1"
 $invoke = "$env:USERPROFILE\.codex\skills\auto-release\scripts\invoke-release.ps1"
 
 # 1. 不改版本，仅构建本地测试程序
-& $invoke -Operation LocalBuild -RepositoryRoot "<仓库根目录>"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $invoke -Operation LocalBuild -RepositoryRoot "<仓库根目录>"
 
 # 2. 中文提交全部更改并推送当前分支
-& $invoke -Operation CommitPush -Summary "一句中文总结" -RepositoryRoot "<仓库根目录>"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $invoke -Operation CommitPush -Summary "一句中文总结" -RepositoryRoot "<仓库根目录>"
 
 # 3. 构建全部发布包并正式发布 GitHub
-& $invoke -Operation Release -Version v1.2.3 -Summary "一句中文总结" `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $invoke -Operation Release -Version v1.2.3 -Summary "一句中文总结" `
   -ReleaseNotes "<中文 Release Notes>" -RepositoryRoot "<仓库根目录>"
 ```
 
-`LocalBuild` 会自动创建 `<仓库根目录>/output`，把本地构建产物复制为不含版本号的 `output/<项目名><扩展名>`；例如 `output/CopyShare.exe`。若同路径的 EXE 正在运行，先按完整路径强制终止占用进程，再覆盖标准文件，禁止改用 `-2` 等备用文件名。构建工具的原始产物仍保留，同时在 `.git/auto-release/local-build.json` 保存构建指纹。正式发布时源文件和产物未变化即可跳过重复的本地构建，但 GitHub Actions 仍会重新生成正式发布包。
+`LocalBuild` 只校验本地版本、命令和产物配置，不要求 GitHub 工作流具备标签触发器。它会自动创建 `<仓库根目录>/output`，把本地构建产物复制为不含版本号的 `output/<项目名><扩展名>`；例如 `output/CopyShare.exe`。若同路径的 EXE 正在运行，先按完整路径强制终止占用进程，再覆盖标准文件，禁止改用 `-2` 等备用文件名。构建工具的原始产物仍保留，同时在 `.git/auto-release/local-build.json` 保存构建指纹。正式发布时源文件和产物未变化即可跳过重复的本地构建，但 GitHub Actions 仍会重新生成正式发布包。
 
 人工工作流默认不覆盖：可选择兼容复用，或保留原工作流并新建 `.github/workflows/auto-release.yml`。
 
