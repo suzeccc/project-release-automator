@@ -17,7 +17,7 @@ $setup = "$env:USERPROFILE\.codex\skills\project-release-automator\scripts\setup
 - `Generate`：生成 schema v2 配置和标签触发的 GitHub Actions 工作流。
 - `Validate`：检查配置、版本源、工作流标记、标签触发器、权限、草稿 Release 和产物规则。
 
-`-ProjectType auto|tauri|node|go` 默认为 `auto`。Tauri 的识别优先级最高；普通项目同时存在 `package.json` 和 `go.mod` 时必须显式指定类型。
+`-ProjectType auto|tauri|node|go|python|rust|dotnet|java` 默认为 `auto`。Tauri 的识别优先级最高；其他项目存在多个生态清单时必须显式指定类型。
 
 生成的工作流首部包含以下托管标记：
 
@@ -101,9 +101,9 @@ $setup = "$env:USERPROFILE\.codex\skills\project-release-automator\scripts\setup
 ## 字段规则
 
 - `schemaVersion`：发布执行器兼容 `1` 和 `2`；自动生成器使用 `2`。
-- `projectType`：schema v2 生成配置使用 `tauri`、`node` 或 `go`。
+- `projectType`：schema v2 生成配置使用 `tauri`、`node`、`go`、`python`、`rust`、`dotnet` 或 `java`。
 - `automation.generator`：自动生成配置固定为 `project-release-automator`。
-- `automation.template`：工作流模板标识，目前为 `tauri-v1`、`node-v1` 或 `go-v1`。
+- `automation.template`：工作流模板标识，为 `<projectType>-v1`。
 - `automation.managedWorkflow`：为 `true` 时，`Validate` 强制校验托管标记和模板一致性。
 - `automation.workflowFile`：托管工作流的仓库相对路径。
 - `projectName`、`branch`、`remote`：必填。
@@ -143,6 +143,26 @@ $setup = "$env:USERPROFILE\.codex\skills\project-release-automator\scripts\setup
 - 从 `go.mod` 读取模块名；优先构建 `./cmd/<项目名>`，否则构建当前包。
 - 使用已有 `VERSION`；缺失时从最新稳定 `vX.Y.Z` 标签推断，仍无标签则创建 `0.1.0`。
 - 本地执行 `go test ./...` 和 Windows 构建；工作流生成 Windows、Linux、macOS 的 amd64/arm64 六个产物。
+
+### Python
+
+- 从 `pyproject.toml` 读取静态 PEP 621 或 Poetry 名称与版本。
+- 识别 pip、uv 或 Poetry，运行测试后同时构建 wheel 和 sdist。
+
+### Rust
+
+- 从根目录 `Cargo.toml` 的 `[package]` 读取名称与版本；仅工作区项目需手动配置。
+- 运行 `cargo test --all` 与 `cargo package`，发布 `.crate`。
+
+### .NET
+
+- 自动处理仅含一个 `.csproj`、`.fsproj` 或 `.vbproj` 的仓库。
+- 使用 `<Version>`/`<VersionPrefix>`；缺失时创建 `VERSION`，运行 restore、test 和 pack，发布 `.nupkg`。
+
+### Java
+
+- 支持根目录 Maven `pom.xml` 或 Gradle `build.gradle(.kts)` 的静态语义版本。
+- 优先使用 Maven/Gradle Wrapper，运行测试与构建后发布 `.jar`。
 
 ## 最小无工作流示例
 

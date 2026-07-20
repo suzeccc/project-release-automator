@@ -9,6 +9,10 @@ $workflowTemplates = @(
   Join-Path $root "assets\workflows\tauri.yml"
   Join-Path $root "assets\workflows\node.yml"
   Join-Path $root "assets\workflows\go.yml"
+  Join-Path $root "assets\workflows\python.yml"
+  Join-Path $root "assets\workflows\rust.yml"
+  Join-Path $root "assets\workflows\dotnet.yml"
+  Join-Path $root "assets\workflows\java.yml"
 )
 
 function Assert-Match([string]$Value, [string]$Pattern, [string]$Message) {
@@ -199,7 +203,7 @@ try {
   },
   "prepare": {
     "parallel": false,
-    "commands": [{"name":"Check","command":"echo checked"}],
+    "commands": [{"name":"Check {projectName}","command":"echo {version}"}],
     "artifacts": []
   },
   "publish": {
@@ -228,7 +232,7 @@ try {
   $planText = $plan -join [Environment]::NewLine
   Assert-Match $planText "Project: Example" "plan missing configured project name"
   Assert-Match $planText "Target version: 1\.1\.0" "plan missing target version"
-  Assert-Match $planText "Prepare command: Check -> echo checked" "plan missing configured command"
+  Assert-Match $planText "Prepare command: Check Example -> echo 1\.1\.0" "plan did not expand configured command tokens"
   Assert-Match $planText "Release mode: none" "plan missing release strategy"
 
   & $script `
@@ -374,6 +378,124 @@ finally {
   Remove-TestDirectory $goRoot
 }
 
+$pythonRoot = New-TestDirectory "python"
+try {
+  Write-TestUtf8 (Join-Path $pythonRoot "pyproject.toml") @'
+[project]
+name = "python-fixture"
+version = "1.2.3"
+requires-python = ">=3.10"
+'@
+  New-Item -ItemType Directory -Path (Join-Path $pythonRoot "tests") | Out-Null
+  $pythonDetection = (& $setupScript -Mode Detect -RepositoryRoot $pythonRoot) | ConvertFrom-Json
+  Assert-Equal $pythonDetection.projectType "python" "Python fixture was not detected"
+  Assert-Equal $pythonDetection.packageManager "pip" "Python package manager fallback is wrong"
+  & $setupScript -Mode Generate -RepositoryRoot $pythonRoot
+  & $setupScript -Mode Validate -RepositoryRoot $pythonRoot
+  $pythonConfig = Get-Content -Raw -Encoding UTF8 (Join-Path $pythonRoot ".codex-release.json") | ConvertFrom-Json
+  Assert-Equal $pythonConfig.automation.template "python-v1" "Python config uses the wrong template"
+  Assert-Equal @($pythonConfig.publish.release.requiredAssets).Count 2 "Python config does not validate wheel and sdist"
+  $pythonWorkflow = Get-Content -Raw -Encoding UTF8 (Join-Path $pythonRoot ".github\workflows\release.yml")
+  Assert-Match $pythonWorkflow 'actions/setup-python@v6' "Python workflow uses the wrong setup action"
+}
+finally {
+  Remove-TestDirectory $pythonRoot
+}
+
+$rustRoot = New-TestDirectory "rust"
+try {
+  Write-TestUtf8 (Join-Path $rustRoot "Cargo.toml") @'
+[package]
+name = "rust-fixture"
+version = "1.2.3"
+edition = "2021"
+'@
+  Write-TestUtf8 (Join-Path $rustRoot "src\lib.rs") "pub fn answer() -> u32 { 42 }`n"
+  $rustDetection = (& $setupScript -Mode Detect -RepositoryRoot $rustRoot) | ConvertFrom-Json
+  Assert-Equal $rustDetection.projectType "rust" "Rust fixture was not detected"
+  & $setupScript -Mode Generate -RepositoryRoot $rustRoot
+  & $setupScript -Mode Validate -RepositoryRoot $rustRoot
+  $rustConfig = Get-Content -Raw -Encoding UTF8 (Join-Path $rustRoot ".codex-release.json") | ConvertFrom-Json
+  Assert-Equal $rustConfig.automation.template "rust-v1" "Rust config uses the wrong template"
+  Assert-Match ([string]$rustConfig.prepare.commands[1].command) 'cargo package' "Rust package command is missing"
+}
+finally {
+  Remove-TestDirectory $rustRoot
+}
+
+$dotnetRoot = New-TestDirectory "dotnet"
+try {
+  Write-TestUtf8 (Join-Path $dotnetRoot "DotNetFixture.csproj") @'
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <PackageId>DotNet.Fixture</PackageId>
+    <Version>1.2.3</Version>
+  </PropertyGroup>
+</Project>
+'@
+  $dotnetDetection = (& $setupScript -Mode Detect -RepositoryRoot $dotnetRoot) | ConvertFrom-Json
+  Assert-Equal $dotnetDetection.projectType "dotnet" ".NET fixture was not detected"
+  Assert-Equal $dotnetDetection.projectName "DotNet.Fixture" ".NET PackageId was not detected"
+  & $setupScript -Mode Generate -RepositoryRoot $dotnetRoot
+  & $setupScript -Mode Validate -RepositoryRoot $dotnetRoot
+  $dotnetConfig = Get-Content -Raw -Encoding UTF8 (Join-Path $dotnetRoot ".codex-release.json") | ConvertFrom-Json
+  Assert-Equal $dotnetConfig.automation.template "dotnet-v1" ".NET config uses the wrong template"
+  $dotnetWorkflow = Get-Content -Raw -Encoding UTF8 (Join-Path $dotnetRoot ".github\workflows\release.yml")
+  Assert-Match $dotnetWorkflow 'actions/setup-dotnet@v5' ".NET workflow uses the wrong setup action"
+  Assert-Match $dotnetWorkflow 'dotnet-version: "8\.0\.x"' ".NET SDK was not inferred from TargetFramework"
+}
+finally {
+  Remove-TestDirectory $dotnetRoot
+}
+
+$mavenRoot = New-TestDirectory "maven"
+try {
+  Write-TestUtf8 (Join-Path $mavenRoot "pom.xml") @'
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>example.invalid</groupId>
+  <artifactId>java-fixture</artifactId>
+  <version>1.2.3</version>
+</project>
+'@
+  $mavenDetection = (& $setupScript -Mode Detect -RepositoryRoot $mavenRoot) | ConvertFrom-Json
+  Assert-Equal $mavenDetection.projectType "java" "Maven fixture was not detected as Java"
+  Assert-Equal $mavenDetection.packageManager "maven" "Maven build system was not detected"
+  & $setupScript -Mode Generate -RepositoryRoot $mavenRoot
+  & $setupScript -Mode Validate -RepositoryRoot $mavenRoot
+  $mavenConfig = Get-Content -Raw -Encoding UTF8 (Join-Path $mavenRoot ".codex-release.json") | ConvertFrom-Json
+  Assert-Equal $mavenConfig.automation.template "java-v1" "Maven config uses the wrong template"
+  $mavenWorkflow = Get-Content -Raw -Encoding UTF8 (Join-Path $mavenRoot ".github\workflows\release.yml")
+  Assert-Match $mavenWorkflow 'actions/setup-java@v5' "Java workflow uses the wrong setup action"
+  Assert-Match $mavenWorkflow 'cache: maven' "Maven dependency cache is missing"
+}
+finally {
+  Remove-TestDirectory $mavenRoot
+}
+
+$gradleRoot = New-TestDirectory "gradle"
+try {
+  Write-TestUtf8 (Join-Path $gradleRoot "build.gradle.kts") @'
+plugins { java }
+group = "example.invalid"
+version = "1.2.3"
+'@
+  Write-TestUtf8 (Join-Path $gradleRoot "settings.gradle.kts") 'rootProject.name = "gradle-fixture"'
+  $gradleDetection = (& $setupScript -Mode Detect -RepositoryRoot $gradleRoot) | ConvertFrom-Json
+  Assert-Equal $gradleDetection.projectType "java" "Gradle fixture was not detected as Java"
+  Assert-Equal $gradleDetection.packageManager "gradle" "Gradle build system was not detected"
+  Assert-Equal $gradleDetection.projectName "gradle-fixture" "Gradle root project name was not detected"
+  & $setupScript -Mode Generate -RepositoryRoot $gradleRoot
+  & $setupScript -Mode Validate -RepositoryRoot $gradleRoot
+  $gradleWorkflow = Get-Content -Raw -Encoding UTF8 (Join-Path $gradleRoot ".github\workflows\release.yml")
+  Assert-Match $gradleWorkflow 'cache: gradle' "Gradle dependency cache is missing"
+  Assert-Match $gradleWorkflow 'build/libs' "Gradle artifact directory is wrong"
+}
+finally {
+  Remove-TestDirectory $gradleRoot
+}
+
 $ambiguousRoot = New-TestDirectory "ambiguous"
 try {
   Write-TestUtf8 (Join-Path $ambiguousRoot "package.json") '{"name":"ambiguous","version":"1.0.0"}'
@@ -415,6 +537,7 @@ Assert-Match $scriptSource 'ahead or diverged' "missing remote divergence guard"
 Assert-Match $scriptSource 'Release is already public' "missing public release guard"
 Assert-Match $scriptSource 'gh\.exe' "missing GitHub CLI fallback"
 Assert-Match $scriptSource 'Invoke-ParallelShellChecked' "missing parallel prepare support"
+Assert-Match $scriptSource 'Expand-ConfigTokens \(\[string\]\$_.command\)' "prepare commands do not expand release tokens"
 Assert-Match $scriptSource 'publish-draft.*create.*none' "missing release modes"
 Assert-Match $scriptSource 'schemaVersion -notin @\(1, 2\)' "release runner does not accept schema v1 and v2"
 if ($scriptSource -match 'D:\\QiLin|CopyShare|suzeccc') {
@@ -436,6 +559,9 @@ Assert-Match $referenceSource 'uploadAssets' "config reference missing upload as
 $setupSource = Get-Content -Raw -Encoding UTF8 $setupScript
 Assert-Match $setupSource 'Refusing to overwrite human-managed workflow' "setup script lacks workflow overwrite protection"
 Assert-Match $setupSource 'tauri[\s\S]*node[\s\S]*go' "setup script does not support all project types"
+foreach ($projectType in @("python", "rust", "dotnet", "java")) {
+  Assert-Match $setupSource ('"' + $projectType + '"') "setup script does not support $projectType"
+}
 if ($setupSource -match 'D:\\QiLin|CopyShare|suzeccc') {
   throw "generic setup script contains project-specific values"
 }

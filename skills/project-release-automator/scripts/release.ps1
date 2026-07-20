@@ -367,7 +367,14 @@ function Update-VersionFiles {
 
 function Invoke-ConfiguredCommands {
   $prepare = $script:Config.prepare
-  $commands = @(Get-OptionalProperty $prepare "commands" @())
+  $commands = @(
+    @(Get-OptionalProperty $prepare "commands" @()) | ForEach-Object {
+      [pscustomobject]@{
+        name = Expand-ConfigTokens ([string]$_.name)
+        command = Expand-ConfigTokens ([string]$_.command)
+      }
+    }
+  )
   if ($commands.Count -eq 0) {
     return
   }
@@ -590,7 +597,7 @@ function Invoke-Plan {
     "Prepare parallel: $([bool](Get-OptionalProperty $script:Config.prepare 'parallel' $false))"
   )
   foreach ($command in @(Get-OptionalProperty $script:Config.prepare "commands" @())) {
-    "Prepare command: $($command.name) -> $($command.command)"
+    "Prepare command: $(Expand-ConfigTokens ([string]$command.name)) -> $(Expand-ConfigTokens ([string]$command.command))"
   }
   foreach ($artifact in @(Get-OptionalProperty $script:Config.prepare "artifacts" @())) {
     $source = Expand-ConfigTokens ([string]$artifact.source)

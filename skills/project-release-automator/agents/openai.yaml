@@ -1,4 +1,4 @@
 interface:
   display_name: "Project Release Automator"
-  short_description: "自动生成项目发布配置、GitHub 工作流并完成正式发布"
+  short_description: "为七类常见项目自动生成 GitHub 发布工作流"
   default_prompt: "Use $project-release-automator to detect this project, generate safe release automation, and prepare it for publishing."
