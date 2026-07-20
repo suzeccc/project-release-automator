@@ -1,6 +1,6 @@
 ---
 name: project-release-automator
-description: Detects and configures Tauri, Node.js, Go, Python, Rust, .NET, and Java repositories, then automates packaging and formal releases. Use when the user asks to create or validate release automation, generate a tag-triggered GitHub Actions workflow, or says 打包, 发布, or 正式发布 followed by a semantic version such as v1.2.3. Uses .codex-release.json for version updates, tests, builds, artifacts, tags, workflows, and GitHub Releases without hard-coded project paths.
+description: Detects and configures common application, library, native, mobile, desktop, and container repositories, then automates packaging and formal releases. Supports Tauri, Node.js, Go, Python, Rust, .NET, Java, CMake, Flutter, Android, Electron, and Docker. Use when the user asks to create or validate release automation, generate a tag-triggered GitHub Actions workflow, or says 打包, 发布, or 正式发布 followed by a semantic version such as v1.2.3.
 ---
 
 # Project Release Automator
@@ -18,7 +18,7 @@ $setup = "$env:USERPROFILE\.codex\skills\project-release-automator\scripts\setup
 & $setup -Mode Validate -RepositoryRoot "<仓库根目录>"
 ```
 
-自动支持 Tauri、Node.js、Go、Python、Rust、.NET 和 Java（Maven/Gradle）。Tauri 优先识别；其他多生态清单并存时，必须用 `-ProjectType` 显式指定类型。生成器会：
+自动支持 Tauri、Node.js、Go、Python、Rust、.NET、Java、CMake、Flutter、Android、Electron 和 Docker。专用应用类型优先识别；其他多生态清单并存时，必须用 `-ProjectType` 显式指定类型。生成器会：
 
 - 创建 schema v2 `.codex-release.json`。
 - 创建标签触发的 `.github/workflows/release.yml`。
@@ -26,6 +26,8 @@ $setup = "$env:USERPROFILE\.codex\skills\project-release-automator\scripts\setup
 - 为 Tauri 生成 Windows x64/ARM64、macOS Intel/Apple Silicon 和 Linux 构建矩阵。
 - 为 Node.js 生成 `.tgz`，为 Go 生成 Windows/Linux/macOS 的 amd64/arm64 二进制。
 - 为 Python 生成 wheel 与 sdist，为 Rust 生成 `.crate`，为 .NET 生成 `.nupkg`，为 Java 生成 `.jar`。
+- 为 CMake 和 Electron 生成六平台压缩包，为 Flutter 生成移动端、桌面端和 Web 包，为 Android 生成 APK/AAB。
+- 为 Docker 构建并推送 GHCR 多架构镜像，同时发布镜像摘要清单。
 - 创建草稿 GitHub Release，等待本地发布流程校验后再公开。
 
 若现有配置或工作流没有 Project Release Automator 的托管标记，生成器必须停止，禁止覆盖。重复生成托管文件必须幂等。配置和工作流属于项目，应与代码一起提交；禁止写入 Token、密钥或账号凭据。完整字段见 [配置参考](references/config.md)。

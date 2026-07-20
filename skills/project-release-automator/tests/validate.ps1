@@ -13,6 +13,11 @@ $workflowTemplates = @(
   Join-Path $root "assets\workflows\rust.yml"
   Join-Path $root "assets\workflows\dotnet.yml"
   Join-Path $root "assets\workflows\java.yml"
+  Join-Path $root "assets\workflows\cmake.yml"
+  Join-Path $root "assets\workflows\flutter.yml"
+  Join-Path $root "assets\workflows\android.yml"
+  Join-Path $root "assets\workflows\electron.yml"
+  Join-Path $root "assets\workflows\docker.yml"
 )
 
 function Assert-Match([string]$Value, [string]$Pattern, [string]$Message) {
@@ -496,6 +501,136 @@ finally {
   Remove-TestDirectory $gradleRoot
 }
 
+$cmakeRoot = New-TestDirectory "cmake"
+try {
+  Write-TestUtf8 (Join-Path $cmakeRoot "CMakeLists.txt") @'
+cmake_minimum_required(VERSION 3.24)
+project(cmake_fixture VERSION 1.2.3 LANGUAGES CXX)
+add_executable(cmake_fixture main.cpp)
+'@
+  Write-TestUtf8 (Join-Path $cmakeRoot "main.cpp") "int main() { return 0; }`n"
+  $cmakeDetection = (& $setupScript -Mode Detect -RepositoryRoot $cmakeRoot) | ConvertFrom-Json
+  Assert-Equal $cmakeDetection.projectType "cmake" "CMake fixture was not detected"
+  Assert-Equal $cmakeDetection.projectName "cmake_fixture" "CMake project name was not detected"
+  & $setupScript -Mode Generate -RepositoryRoot $cmakeRoot
+  & $setupScript -Mode Validate -RepositoryRoot $cmakeRoot
+  $cmakeConfig = Get-Content -Raw -Encoding UTF8 (Join-Path $cmakeRoot ".codex-release.json") | ConvertFrom-Json
+  Assert-Equal $cmakeConfig.automation.template "cmake-v1" "CMake config uses the wrong template"
+  Assert-Equal @($cmakeConfig.publish.release.requiredAssets).Count 6 "CMake config does not validate six platform archives"
+  $cmakeWorkflow = Get-Content -Raw -Encoding UTF8 (Join-Path $cmakeRoot ".github\workflows\release.yml")
+  Assert-Match $cmakeWorkflow 'windows-11-arm' "CMake workflow is missing Windows ARM64"
+  Assert-Match $cmakeWorkflow 'cmake_fixture' "CMake executable target was not rendered"
+}
+finally {
+  Remove-TestDirectory $cmakeRoot
+}
+
+$flutterRoot = New-TestDirectory "flutter"
+try {
+  Write-TestUtf8 (Join-Path $flutterRoot "pubspec.yaml") @'
+name: flutter_fixture
+version: 1.2.3+4
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+'@
+  New-Item -ItemType Directory -Path (Join-Path $flutterRoot "test") | Out-Null
+  $flutterDetection = (& $setupScript -Mode Detect -RepositoryRoot $flutterRoot) | ConvertFrom-Json
+  Assert-Equal $flutterDetection.projectType "flutter" "Flutter fixture was not detected"
+  Assert-Equal $flutterDetection.version "1.2.3" "Flutter build metadata was not normalized"
+  & $setupScript -Mode Generate -RepositoryRoot $flutterRoot
+  & $setupScript -Mode Validate -RepositoryRoot $flutterRoot
+  $flutterConfig = Get-Content -Raw -Encoding UTF8 (Join-Path $flutterRoot ".codex-release.json") | ConvertFrom-Json
+  Assert-Equal $flutterConfig.automation.template "flutter-v1" "Flutter config uses the wrong template"
+  Assert-Equal @($flutterConfig.publish.release.requiredAssets).Count 7 "Flutter config does not validate all packages"
+  $flutterWorkflow = Get-Content -Raw -Encoding UTF8 (Join-Path $flutterRoot ".github\workflows\release.yml")
+  Assert-Match $flutterWorkflow 'subosito/flutter-action@v2' "Flutter setup action is wrong"
+  Assert-Match $flutterWorkflow 'android-aab' "Flutter workflow is missing Android App Bundle"
+}
+finally {
+  Remove-TestDirectory $flutterRoot
+}
+
+$androidRoot = New-TestDirectory "android"
+try {
+  Write-TestUtf8 (Join-Path $androidRoot "settings.gradle.kts") 'rootProject.name = "android-fixture"'
+  Write-TestUtf8 (Join-Path $androidRoot "build.gradle.kts") 'plugins { id("com.android.application") version "8.7.0" apply false }'
+  Write-TestUtf8 (Join-Path $androidRoot "app\build.gradle.kts") @'
+plugins { id("com.android.application") }
+android {
+  namespace = "invalid.example.fixture"
+  defaultConfig {
+    applicationId = "invalid.example.fixture"
+    versionCode = 1
+    versionName = "1.2.3"
+  }
+}
+'@
+  Write-TestUtf8 (Join-Path $androidRoot "gradlew") "#!/bin/sh`n"
+  Write-TestUtf8 (Join-Path $androidRoot "gradlew.bat") "@echo off`r`n"
+  $androidDetection = (& $setupScript -Mode Detect -RepositoryRoot $androidRoot) | ConvertFrom-Json
+  Assert-Equal $androidDetection.projectType "android" "Android fixture was not detected before generic Java"
+  Assert-Equal $androidDetection.buildPath "app" "Android application module was not detected"
+  & $setupScript -Mode Generate -RepositoryRoot $androidRoot
+  & $setupScript -Mode Validate -RepositoryRoot $androidRoot
+  $androidConfig = Get-Content -Raw -Encoding UTF8 (Join-Path $androidRoot ".codex-release.json") | ConvertFrom-Json
+  Assert-Equal $androidConfig.automation.template "android-v1" "Android config uses the wrong template"
+  Assert-Equal @($androidConfig.publish.release.requiredAssets).Count 2 "Android config does not validate APK and AAB"
+  $androidWorkflow = Get-Content -Raw -Encoding UTF8 (Join-Path $androidRoot ".github\workflows\release.yml")
+  Assert-Match $androidWorkflow 'gradle/actions/setup-gradle@v6' "Android workflow uses the wrong Gradle action"
+}
+finally {
+  Remove-TestDirectory $androidRoot
+}
+
+$electronRoot = New-TestDirectory "electron"
+try {
+  Write-TestUtf8 (Join-Path $electronRoot "package.json") @'
+{
+  "name": "electron-fixture",
+  "productName": "Electron Fixture",
+  "version": "1.2.3",
+  "devDependencies": {"electron": "^40.0.0"},
+  "scripts": {"test": "node --test", "dist": "electron-builder"},
+  "build": {"directories": {"output": "release-build"}}
+}
+'@
+  Write-TestUtf8 (Join-Path $electronRoot "package-lock.json") '{"name":"electron-fixture","version":"1.2.3","lockfileVersion":3,"packages":{"":{"name":"electron-fixture","version":"1.2.3"}}}'
+  $electronDetection = (& $setupScript -Mode Detect -RepositoryRoot $electronRoot) | ConvertFrom-Json
+  Assert-Equal $electronDetection.projectType "electron" "Electron fixture was detected as generic Node.js"
+  & $setupScript -Mode Generate -RepositoryRoot $electronRoot
+  & $setupScript -Mode Validate -RepositoryRoot $electronRoot
+  $electronConfig = Get-Content -Raw -Encoding UTF8 (Join-Path $electronRoot ".codex-release.json") | ConvertFrom-Json
+  Assert-Equal $electronConfig.automation.template "electron-v1" "Electron config uses the wrong template"
+  Assert-Equal @($electronConfig.publish.release.requiredAssets).Count 6 "Electron config does not validate six platform archives"
+  $electronWorkflow = Get-Content -Raw -Encoding UTF8 (Join-Path $electronRoot ".github\workflows\release.yml")
+  Assert-Match $electronWorkflow 'release-build/\*' "Electron output directory was not rendered"
+}
+finally {
+  Remove-TestDirectory $electronRoot
+}
+
+$dockerRoot = New-TestDirectory "docker"
+try {
+  Write-TestUtf8 (Join-Path $dockerRoot "Dockerfile") @'
+FROM scratch
+LABEL org.opencontainers.image.title="docker-fixture"
+'@
+  $dockerDetection = (& $setupScript -Mode Detect -RepositoryRoot $dockerRoot) | ConvertFrom-Json
+  Assert-Equal $dockerDetection.projectType "docker" "Docker-only fixture was not detected"
+  & $setupScript -Mode Generate -RepositoryRoot $dockerRoot
+  & $setupScript -Mode Validate -RepositoryRoot $dockerRoot
+  Assert-Equal ([IO.File]::ReadAllText((Join-Path $dockerRoot "VERSION")).Trim()) "0.1.0" "Docker VERSION default is wrong"
+  $dockerConfig = Get-Content -Raw -Encoding UTF8 (Join-Path $dockerRoot ".codex-release.json") | ConvertFrom-Json
+  Assert-Equal $dockerConfig.automation.template "docker-v1" "Docker config uses the wrong template"
+  $dockerWorkflow = Get-Content -Raw -Encoding UTF8 (Join-Path $dockerRoot ".github\workflows\release.yml")
+  Assert-Match $dockerWorkflow 'packages: write' "Docker workflow cannot publish GHCR packages"
+  Assert-Match $dockerWorkflow 'docker/build-push-action@v7' "Docker workflow uses the wrong build action"
+  Assert-Match $dockerWorkflow 'linux/amd64,linux/arm64' "Docker workflow is not multi-architecture"
+}
+finally {
+  Remove-TestDirectory $dockerRoot
+}
+
 $ambiguousRoot = New-TestDirectory "ambiguous"
 try {
   Write-TestUtf8 (Join-Path $ambiguousRoot "package.json") '{"name":"ambiguous","version":"1.0.0"}'
@@ -560,6 +695,9 @@ $setupSource = Get-Content -Raw -Encoding UTF8 $setupScript
 Assert-Match $setupSource 'Refusing to overwrite human-managed workflow' "setup script lacks workflow overwrite protection"
 Assert-Match $setupSource 'tauri[\s\S]*node[\s\S]*go' "setup script does not support all project types"
 foreach ($projectType in @("python", "rust", "dotnet", "java")) {
+  Assert-Match $setupSource ('"' + $projectType + '"') "setup script does not support $projectType"
+}
+foreach ($projectType in @("cmake", "flutter", "android", "electron", "docker")) {
   Assert-Match $setupSource ('"' + $projectType + '"') "setup script does not support $projectType"
 }
 if ($setupSource -match 'D:\\QiLin|CopyShare|suzeccc') {

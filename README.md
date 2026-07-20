@@ -35,11 +35,12 @@ $setup = "$env:USERPROFILE\.codex\skills\project-release-automator\scripts\setup
 & $setup -Mode Validate -RepositoryRoot "<仓库根目录>"
 ```
 
-生成器支持 Tauri、Node.js、Go、Python、Rust、.NET 和 Java（Maven/Gradle），创建项目级 `.codex-release.json` 与标签触发的 `.github/workflows/release.yml`。若工作流由人工维护，生成器会拒绝覆盖。完整字段说明见 [`skills/project-release-automator/references/config.md`](skills/project-release-automator/references/config.md)。
+生成器支持 Tauri、Node.js、Go、Python、Rust、.NET、Java、CMake、Flutter、Android、Electron 和 Docker，创建项目级 `.codex-release.json` 与标签触发的 `.github/workflows/release.yml`。若工作流由人工维护，生成器会拒绝覆盖。完整字段说明见 [`skills/project-release-automator/references/config.md`](skills/project-release-automator/references/config.md)。
 
 ## 支持能力
 
 - 自动检测 Tauri、Node.js、Go、Python、Rust、.NET、Maven 和 Gradle
+- 自动检测 CMake、Flutter、Android、Electron 和 Docker
 - 识别 npm、pnpm、Yarn、Bun、pip、uv、Poetry、Cargo、NuGet 等工具链
 - 安全、幂等地生成发布配置与 GitHub Actions，拒绝覆盖人工工作流
 - Tauri 五平台、Go 六目标和 Node.js `.tgz` 发布矩阵
@@ -66,7 +67,7 @@ $setup = "$env:USERPROFILE\.codex\skills\project-release-automator\scripts\setup
 
 ## English
 
-`project-release-automator` detects Tauri, Node.js, Go, Python, Rust, .NET, and Java repositories, safely generates repository-specific release configuration and tag-triggered GitHub Actions, then packages and publishes releases from Windows. Human-managed workflows are never overwritten.
+`project-release-automator` detects twelve common project families, safely generates repository-specific release configuration and tag-triggered GitHub Actions, then packages and publishes releases from Windows. Human-managed workflows are never overwritten.
 
 ## License
 

@@ -4,7 +4,7 @@ param(
   [ValidateSet("Detect", "Generate", "Validate")]
   [string]$Mode,
 
-  [ValidateSet("auto", "tauri", "node", "go", "python", "rust", "dotnet", "java")]
+  [ValidateSet("auto", "tauri", "node", "go", "python", "rust", "dotnet", "java", "cmake", "flutter", "android", "electron", "docker")]
   [string]$ProjectType = "auto",
 
   [string]$RepositoryRoot = (Get-Location).Path,
@@ -182,6 +182,34 @@ function Get-DotNetProjectFiles {
   return @($files)
 }
 
+function Get-AndroidApplicationModules {
+  $modules = @()
+  foreach ($directory in Get-ChildItem -LiteralPath $script:ResolvedRepositoryRoot -Directory) {
+    foreach ($name in @("build.gradle.kts", "build.gradle")) {
+      $candidate = Join-Path $directory.FullName $name
+      if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+        $content = [IO.File]::ReadAllText($candidate)
+        if ($content -match 'com\.android\.application') {
+          $modules += [pscustomobject]@{
+            Directory = Get-RelativeRepositoryPath $directory.FullName
+            BuildFile = Get-RelativeRepositoryPath $candidate
+            Content = $content
+          }
+        }
+      }
+    }
+  }
+  return @($modules)
+}
+
+function Test-ElectronPackage($Package) {
+  if (-not $Package) { return $false }
+  $dependencies = Get-OptionalProperty $Package "dependencies"
+  $devDependencies = Get-OptionalProperty $Package "devDependencies"
+  return $null -ne (Get-OptionalProperty $dependencies "electron") -or
+    $null -ne (Get-OptionalProperty $devDependencies "electron")
+}
+
 function Get-ProjectProfile([string]$RequestedType) {
   $tauriConfigPath = Join-Path $script:ResolvedRepositoryRoot "src-tauri\tauri.conf.json"
   $tauriCargoPath = Join-Path $script:ResolvedRepositoryRoot "src-tauri\Cargo.toml"
@@ -192,8 +220,13 @@ function Get-ProjectProfile([string]$RequestedType) {
   $mavenPath = Join-Path $script:ResolvedRepositoryRoot "pom.xml"
   $gradlePath = Join-Path $script:ResolvedRepositoryRoot "build.gradle"
   $gradleKtsPath = Join-Path $script:ResolvedRepositoryRoot "build.gradle.kts"
+  $flutterPath = Join-Path $script:ResolvedRepositoryRoot "pubspec.yaml"
+  $cmakePath = Join-Path $script:ResolvedRepositoryRoot "CMakeLists.txt"
+  $dockerPath = Join-Path $script:ResolvedRepositoryRoot "Dockerfile"
   $hasTauri = (Test-Path -LiteralPath $tauriConfigPath -PathType Leaf) -and (Test-Path -LiteralPath $tauriCargoPath -PathType Leaf)
   $hasNode = Test-Path -LiteralPath $packagePath -PathType Leaf
+  $packageManifest = if ($hasNode) { Read-JsonFile $packagePath "package.json" } else { $null }
+  $hasElectron = Test-ElectronPackage $packageManifest
   $hasGo = Test-Path -LiteralPath $goModPath -PathType Leaf
   $hasPython = Test-Path -LiteralPath $pythonPath -PathType Leaf
   $hasRust = Test-Path -LiteralPath $cargoPath -PathType Leaf
@@ -203,23 +236,34 @@ function Get-ProjectProfile([string]$RequestedType) {
   $hasJava = (Test-Path -LiteralPath $mavenPath -PathType Leaf) -or
     (Test-Path -LiteralPath $gradlePath -PathType Leaf) -or
     (Test-Path -LiteralPath $gradleKtsPath -PathType Leaf)
+  $androidModules = @(Get-AndroidApplicationModules)
+  $hasGradleWrapper = Test-Path -LiteralPath (Join-Path $script:ResolvedRepositoryRoot "gradlew") -PathType Leaf
+  $hasAndroid = $androidModules.Count -gt 0 -and $hasGradleWrapper
+  $hasFlutter = Test-Path -LiteralPath $flutterPath -PathType Leaf
+  $hasCMake = Test-Path -LiteralPath $cmakePath -PathType Leaf
+  $hasDocker = Test-Path -LiteralPath $dockerPath -PathType Leaf
 
   $detectedType = $RequestedType
   if ($RequestedType -eq "auto") {
     if ($hasTauri) { $detectedType = "tauri" }
+    elseif ($hasFlutter) { $detectedType = "flutter" }
+    elseif ($hasAndroid) { $detectedType = "android" }
+    elseif ($hasElectron) { $detectedType = "electron" }
     else {
       $candidates = @()
-      if ($hasNode) { $candidates += "node" }
+      if ($hasNode -and -not $hasElectron) { $candidates += "node" }
       if ($hasGo) { $candidates += "go" }
       if ($hasPython) { $candidates += "python" }
       if ($hasRust) { $candidates += "rust" }
       if ($hasDotNet) { $candidates += "dotnet" }
       if ($hasJava) { $candidates += "java" }
+      if ($hasCMake) { $candidates += "cmake" }
+      if ($hasDocker -and $candidates.Count -eq 0) { $candidates += "docker" }
       if ($candidates.Count -gt 1) {
         throw "Project detection is ambiguous: $($candidates -join ', '); use -ProjectType explicitly"
       }
       if ($candidates.Count -eq 0) {
-        throw "Unsupported project: expected Tauri, Node.js, Go, Python, Rust, .NET, or Java manifests"
+        throw "Unsupported project: no supported release manifest was found"
       }
       $detectedType = $candidates[0]
     }
@@ -231,8 +275,95 @@ function Get-ProjectProfile([string]$RequestedType) {
   if ($detectedType -eq "rust" -and -not $hasRust) { throw "Rust detection requires Cargo.toml" }
   if ($detectedType -eq "dotnet" -and $dotnetProjects.Count -ne 1) { throw ".NET detection requires exactly one project file" }
   if ($detectedType -eq "java" -and -not $hasJava) { throw "Java detection requires pom.xml or build.gradle" }
+  if ($detectedType -eq "cmake" -and -not $hasCMake) { throw "CMake detection requires CMakeLists.txt" }
+  if ($detectedType -eq "flutter" -and -not $hasFlutter) { throw "Flutter detection requires pubspec.yaml" }
+  if ($detectedType -eq "android" -and ($androidModules.Count -ne 1 -or -not $hasGradleWrapper)) { throw "Android detection requires one application module and the Gradle wrapper" }
+  if ($detectedType -eq "electron" -and -not $hasElectron) { throw "Electron detection requires the electron package dependency" }
+  if ($detectedType -eq "docker" -and -not $hasDocker) { throw "Docker detection requires Dockerfile" }
 
   $fallbackName = Split-Path -Leaf $script:ResolvedRepositoryRoot
+  if ($detectedType -eq "flutter") {
+    $content = [IO.File]::ReadAllText($flutterPath)
+    $nameMatch = [regex]::Match($content, '(?m)^name:\s*(?<name>[A-Za-z0-9_.-]+)\s*$')
+    $versionMatch = [regex]::Match($content, '(?m)^version:\s*(?<version>\d+\.\d+\.\d+)(?:\+\d+)?\s*$')
+    if (-not $nameMatch.Success -or -not $versionMatch.Success) { throw "pubspec.yaml must contain a name and stable semantic version" }
+    return [pscustomobject]@{
+      ProjectType = "flutter"; ProjectName = $nameMatch.Groups["name"].Value; Version = $versionMatch.Groups["version"].Value
+      VersionSource = "pubspec.yaml"; PackageManager = "flutter"; Package = $null; Manager = $null; BuildPath = $null
+      VersionReadPattern = '(?m)^version:\s*(?<version>\d+\.\d+\.\d+)(?:\+\d+)?\s*$'
+      VersionUpdatePattern = '(?m)^(version:\s*)\d+\.\d+\.\d+(?:\+\d+)?\s*$'
+      HasTests = (Test-Path -LiteralPath (Join-Path $script:ResolvedRepositoryRoot "test") -PathType Container)
+    }
+  }
+
+  if ($detectedType -eq "android") {
+    $module = $androidModules[0]
+    $versionMatch = [regex]::Match($module.Content, '(?m)^\s*versionName\s*(?:=\s*)?["''](?<version>\d+\.\d+\.\d+)["'']')
+    if (-not $versionMatch.Success) { throw "Android application module must contain a static semantic versionName" }
+    $settingsPath = @("settings.gradle.kts", "settings.gradle") | ForEach-Object { Join-Path $script:ResolvedRepositoryRoot $_ } | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    $name = $fallbackName
+    if ($settingsPath) {
+      $settings = [IO.File]::ReadAllText($settingsPath)
+      $nameMatch = [regex]::Match($settings, '(?m)^\s*rootProject\.name\s*=\s*["''](?<name>[^"'']+)["'']')
+      if ($nameMatch.Success) { $name = $nameMatch.Groups["name"].Value }
+    }
+    $localBuild = if (Test-Path -LiteralPath (Join-Path $script:ResolvedRepositoryRoot "gradlew.bat")) { ".\gradlew.bat test assembleRelease bundleRelease --no-daemon" } else { "gradle test assembleRelease bundleRelease --no-daemon" }
+    return [pscustomobject]@{
+      ProjectType = "android"; ProjectName = $name; Version = $versionMatch.Groups["version"].Value
+      VersionSource = $module.BuildFile; PackageManager = "gradle"; Package = $null; Manager = $null; BuildPath = $module.Directory
+      VersionReadPattern = '(?m)^\s*versionName\s*(?:=\s*)?["''](?<version>\d+\.\d+\.\d+)["'']'
+      VersionUpdatePattern = '(?m)^(\s*versionName\s*(?:=\s*)?["''])\d+\.\d+\.\d+(["''])'
+      AndroidLocalBuild = $localBuild
+    }
+  }
+
+  if ($detectedType -eq "electron") {
+    $name = [string](Get-OptionalProperty $packageManifest "productName" (Get-OptionalProperty $packageManifest "name" $fallbackName))
+    $version = [string](Get-OptionalProperty $packageManifest "version" "")
+    if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Electron package.json must contain a stable semantic version" }
+    $scripts = Get-OptionalProperty $packageManifest "scripts"
+    $buildScript = @("dist", "release", "package", "make", "build") | Where-Object { Test-PackageScript $packageManifest $_ } | Select-Object -First 1
+    if (-not $buildScript) { throw "Electron package.json must define a dist, release, package, make, or build script" }
+    $manager = Get-PackageManager
+    $buildConfig = Get-OptionalProperty $packageManifest "build"
+    $directories = Get-OptionalProperty $buildConfig "directories"
+    $output = [string](Get-OptionalProperty $directories "output" "dist")
+    if ([IO.Path]::IsPathRooted($output) -or $output -match '(^|[\\/])\.\.([\\/]|$)' -or $output -notmatch '^[A-Za-z0-9._/\\-]+$') {
+      throw "Electron output directory must be a safe repository-relative path"
+    }
+    return [pscustomobject]@{
+      ProjectType = "electron"; ProjectName = $name; Version = $version; VersionSource = "package.json"
+      PackageManager = $manager.Name; Package = $packageManifest; Manager = $manager; BuildPath = $null
+      ElectronBuildCommand = Get-PackageCommand $manager.Name $buildScript; ElectronOutput = $output
+    }
+  }
+
+  if ($detectedType -eq "cmake") {
+    $content = [IO.File]::ReadAllText($cmakePath)
+    $projectMatch = [regex]::Match($content, '(?is)\bproject\s*\(\s*(?<name>[A-Za-z0-9_.+-]+)(?:(?!\)).)*\)')
+    if (-not $projectMatch.Success) { throw "CMakeLists.txt must contain a project declaration" }
+    $versionMatch = [regex]::Match($projectMatch.Value, '(?is)\bVERSION\s+(?<version>\d+\.\d+\.\d+)')
+    $targets = @([regex]::Matches($content, '(?im)^\s*add_executable\s*\(\s*(?<name>[A-Za-z0-9_.+-]+)') | ForEach-Object { $_.Groups["name"].Value } | Sort-Object -Unique)
+    if ($targets.Count -ne 1) { throw "CMake generation requires exactly one add_executable target" }
+    $needsVersionFile = -not $versionMatch.Success
+    return [pscustomobject]@{
+      ProjectType = "cmake"; ProjectName = $projectMatch.Groups["name"].Value; Version = if ($needsVersionFile) { Get-InferredVersion } else { $versionMatch.Groups["version"].Value }
+      VersionSource = if ($needsVersionFile) { "VERSION" } else { "CMakeLists.txt" }
+      PackageManager = "cmake"; Package = $null; Manager = $null; BuildPath = $null
+      CMakeTarget = $targets[0]; NeedsVersionFile = $needsVersionFile
+    }
+  }
+
+  if ($detectedType -eq "docker") {
+    $dockerContent = [IO.File]::ReadAllText($dockerPath)
+    $titleMatch = [regex]::Match($dockerContent, '(?im)^\s*LABEL\s+org\.opencontainers\.image\.title\s*=\s*["'']?(?<name>[^"''\s]+)')
+    $name = if ($titleMatch.Success) { $titleMatch.Groups["name"].Value } else { $fallbackName }
+    return [pscustomobject]@{
+      ProjectType = "docker"; ProjectName = $name; Version = Get-InferredVersion; VersionSource = "VERSION"
+      PackageManager = "docker"; Package = $null; Manager = $null; BuildPath = "Dockerfile"
+      NeedsVersionFile = -not (Test-Path -LiteralPath (Join-Path $script:ResolvedRepositoryRoot "VERSION"))
+    }
+  }
   if ($detectedType -eq "tauri") {
     $tauri = Read-JsonFile $tauriConfigPath "Tauri config"
     $tauriPackage = Get-OptionalProperty $tauri "package"
@@ -449,6 +580,30 @@ function Get-RequiredAssets([string]$Type, [string]$Stem) {
   if ($Type -eq "java") {
     return @([pscustomobject][ordered]@{ pattern = "(?i)^$([regex]::Escape($Stem))-\d+\.\d+\.\d+(?:-[^/]+)?\.jar$"; label = "Java package" })
   }
+  if ($Type -eq "cmake" -or $Type -eq "electron") {
+    $names = @(
+      "$Stem-windows-x64.zip", "$Stem-windows-arm64.zip",
+      "$Stem-linux-x64.zip", "$Stem-linux-arm64.zip",
+      "$Stem-macos-x64.zip", "$Stem-macos-arm64.zip"
+    )
+    return @($names | ForEach-Object { [pscustomobject][ordered]@{ pattern = "(?i)^$([regex]::Escape($_))$"; label = $_ } })
+  }
+  if ($Type -eq "flutter") {
+    $names = @(
+      "$Stem-android-apk.apk", "$Stem-android-aab.aab", "$Stem-windows-x64.zip",
+      "$Stem-linux-x64.tar.gz", "$Stem-macos-x64.zip", "$Stem-macos-arm64.zip", "$Stem-web.zip"
+    )
+    return @($names | ForEach-Object { [pscustomobject][ordered]@{ pattern = "(?i)^$([regex]::Escape($_))$"; label = $_ } })
+  }
+  if ($Type -eq "android") {
+    return @(
+      [pscustomobject][ordered]@{ pattern = "(?i)^$([regex]::Escape($Stem))-\d+\.\d+\.\d+\.apk$"; label = "Android APK" },
+      [pscustomobject][ordered]@{ pattern = "(?i)^$([regex]::Escape($Stem))-\d+\.\d+\.\d+\.aab$"; label = "Android App Bundle" }
+    )
+  }
+  if ($Type -eq "docker") {
+    return @([pscustomobject][ordered]@{ pattern = "(?i)^$([regex]::Escape($Stem))-\d+\.\d+\.\d+-image\.txt$"; label = "Container image manifest" })
+  }
   return @(
     [pscustomobject][ordered]@{ pattern = '(?i)\.msi$'; label = "Windows MSI installer" },
     [pscustomobject][ordered]@{ pattern = '(?i)(?:setup|installer).*\.exe$'; label = "Windows executable installer" },
@@ -475,6 +630,21 @@ function Get-ExpectedAssets($Profile, [string]$Stem) {
   if ($Profile.ProjectType -eq "rust") { return @("$Stem-$($Profile.Version).crate") }
   if ($Profile.ProjectType -eq "dotnet") { return @("$Stem.$($Profile.Version).nupkg") }
   if ($Profile.ProjectType -eq "java") { return @("$Stem-$($Profile.Version).jar") }
+  if ($Profile.ProjectType -eq "cmake" -or $Profile.ProjectType -eq "electron") {
+    return @(
+      "$Stem-windows-x64.zip", "$Stem-windows-arm64.zip",
+      "$Stem-linux-x64.zip", "$Stem-linux-arm64.zip",
+      "$Stem-macos-x64.zip", "$Stem-macos-arm64.zip"
+    )
+  }
+  if ($Profile.ProjectType -eq "flutter") {
+    return @(
+      "$Stem-android-apk.apk", "$Stem-android-aab.aab", "$Stem-windows-x64.zip",
+      "$Stem-linux-x64.tar.gz", "$Stem-macos-x64.zip", "$Stem-macos-arm64.zip", "$Stem-web.zip"
+    )
+  }
+  if ($Profile.ProjectType -eq "android") { return @("$Stem-$($Profile.Version).apk", "$Stem-$($Profile.Version).aab") }
+  if ($Profile.ProjectType -eq "docker") { return @("$Stem-$($Profile.Version)-image.txt") }
   return @(
     "${Stem}_$($Profile.Version)_x64_en-US.msi",
     "${Stem}_$($Profile.Version)_x64-setup.exe",
@@ -509,6 +679,17 @@ function New-GenerationBundle($Profile) {
     }
     $commands += [pscustomobject][ordered]@{ name = "Pack"; command = "if not exist dist mkdir dist && npm pack --pack-destination dist" }
     $artifacts += [pscustomobject][ordered]@{ source = "dist/$Stem-{version}.tgz"; sha256 = $true }
+  }
+  elseif ($Profile.ProjectType -eq "electron") {
+    $readPattern = '"version"\s*:\s*"(?<version>\d+\.\d+\.\d+)"'
+    $updates += New-VersionUpdate "package.json" '("version"\s*:\s*")\d+\.\d+\.\d+(")' '${1}{version}$2'
+    Add-ExistingVersionUpdate ([ref]$updates) "package-lock.json" '(?ms)\A(\s*\{.{0,1000}?"version"\s*:\s*")\d+\.\d+\.\d+(")' '${1}{version}$2'
+    Add-ExistingVersionUpdate ([ref]$updates) "package-lock.json" '(?ms)(""\s*:\s*\{[^{}]*?"version"\s*:\s*")\d+\.\d+\.\d+(")' '${1}{version}$2'
+    $commands += [pscustomobject][ordered]@{ name = "Install dependencies"; command = $Profile.Manager.Install }
+    if (Test-PackageScript $Profile.Package "test") {
+      $commands += [pscustomobject][ordered]@{ name = "Tests"; command = Get-PackageCommand $Profile.Manager.Name "test" }
+    }
+    $commands += [pscustomobject][ordered]@{ name = "Build Electron packages"; command = $Profile.ElectronBuildCommand }
   }
   elseif ($Profile.ProjectType -eq "tauri") {
     $readPattern = '"version"\s*:\s*"(?<version>\d+\.\d+\.\d+)"'
@@ -545,6 +726,42 @@ function New-GenerationBundle($Profile) {
     $commands += [pscustomobject][ordered]@{ name = "Tests"; command = "go test ./..." }
     $commands += [pscustomobject][ordered]@{ name = "Build Windows"; command = "if not exist dist mkdir dist && go build -trimpath -o dist\$Stem.exe $($Profile.BuildPath)" }
     $artifacts += [pscustomobject][ordered]@{ source = "dist/$Stem.exe"; sha256 = $true }
+  }
+  elseif ($Profile.ProjectType -eq "flutter") {
+    $readPattern = $Profile.VersionReadPattern
+    $updates += New-VersionUpdate $Profile.VersionSource $Profile.VersionUpdatePattern '${1}{version}'
+    $commands += [pscustomobject][ordered]@{ name = "Install dependencies"; command = "flutter pub get" }
+    if ($Profile.HasTests) { $commands += [pscustomobject][ordered]@{ name = "Tests"; command = "flutter test" } }
+    $commands += [pscustomobject][ordered]@{ name = "Build Windows"; command = "flutter build windows --release" }
+  }
+  elseif ($Profile.ProjectType -eq "android") {
+    $readPattern = $Profile.VersionReadPattern
+    $updates += New-VersionUpdate $Profile.VersionSource $Profile.VersionUpdatePattern '${1}{version}$2'
+    $commands += [pscustomobject][ordered]@{ name = "Test and package Android"; command = $Profile.AndroidLocalBuild }
+  }
+  elseif ($Profile.ProjectType -eq "cmake") {
+    if ($Profile.NeedsVersionFile) {
+      $readPattern = '(?m)^(?<version>\d+\.\d+\.\d+)\s*$'
+      $updates += New-VersionUpdate "VERSION" '(?m)^\d+\.\d+\.\d+\s*$' '{version}'
+      $additionalFiles += [pscustomobject]@{ RelativePath = "VERSION"; Content = "$($Profile.Version)`n" }
+    }
+    else {
+      $projectName = [regex]::Escape($Profile.ProjectName)
+      $readPattern = '(?is)\bproject\s*\(\s*' + $projectName + '(?:(?!\)).)*?\bVERSION\s+(?<version>\d+\.\d+\.\d+)'
+      $updatePattern = '(?is)(\bproject\s*\(\s*' + $projectName + '(?:(?!\)).)*?\bVERSION\s+)\d+\.\d+\.\d+'
+      $updates += New-VersionUpdate "CMakeLists.txt" $updatePattern '${1}{version}'
+    }
+    $commands += [pscustomobject][ordered]@{ name = "Configure"; command = "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release" }
+    $commands += [pscustomobject][ordered]@{ name = "Build"; command = "cmake --build build --config Release --parallel" }
+    $commands += [pscustomobject][ordered]@{ name = "Tests"; command = "ctest --test-dir build -C Release --output-on-failure" }
+  }
+  elseif ($Profile.ProjectType -eq "docker") {
+    $readPattern = '(?m)^(?<version>\d+\.\d+\.\d+)\s*$'
+    $updates += New-VersionUpdate "VERSION" '(?m)^\d+\.\d+\.\d+\s*$' '{version}'
+    if ($Profile.NeedsVersionFile) {
+      $additionalFiles += [pscustomobject]@{ RelativePath = "VERSION"; Content = "$($Profile.Version)`n" }
+    }
+    $commands += [pscustomobject][ordered]@{ name = "Build container"; command = "docker build --file `"$($Profile.BuildPath)`" --tag `"${Stem}:{version}`" ." }
   }
   elseif ($Profile.ProjectType -eq "python") {
     $readPattern = $Profile.VersionReadPattern
@@ -593,10 +810,13 @@ function New-GenerationBundle($Profile) {
     $commands += [pscustomobject][ordered]@{ name = "Pack"; command = "dotnet pack `"$($Profile.BuildPath)`" --no-restore --configuration Release -p:PackageVersion={version} --output dist" }
     $artifacts += [pscustomobject][ordered]@{ source = "dist/$Stem.{version}.nupkg"; sha256 = $true }
   }
-  else {
+  elseif ($Profile.ProjectType -eq "java") {
     $readPattern = $Profile.VersionReadPattern
     $updates += New-VersionUpdate $Profile.VersionSource $Profile.VersionUpdatePattern '${1}{version}$2'
     $commands += [pscustomobject][ordered]@{ name = "Test and package"; command = $Profile.JavaLocalBuild }
+  }
+  else {
+    throw "No generation strategy for project type: $($Profile.ProjectType)"
   }
 
   $templateName = "$($Profile.ProjectType)-v1"
@@ -682,6 +902,11 @@ function New-GenerationBundle($Profile) {
     JAVA_CACHE = [string](Get-OptionalProperty $Profile "JavaCache" "maven")
     JAVA_BUILD_COMMAND = [string](Get-OptionalProperty $Profile "JavaWorkflowBuild" "mvn -B test package")
     JAVA_ARTIFACT_DIRECTORY = [string](Get-OptionalProperty $Profile "JavaArtifactDirectory" "target")
+    CMAKE_TARGET = [string](Get-OptionalProperty $Profile "CMakeTarget" "app")
+    ANDROID_MODULE = [string]$Profile.BuildPath
+    ELECTRON_BUILD_COMMAND = [string](Get-OptionalProperty $Profile "ElectronBuildCommand" "npm run dist")
+    ELECTRON_OUTPUT = [string](Get-OptionalProperty $Profile "ElectronOutput" "dist")
+    DOCKERFILE = [string]$Profile.BuildPath
     EXPECTED_ASSET = $expectedAssets[0]
     EXPECTED_ASSET_COMMENTS = (($expectedAssets | ForEach-Object { "# Expected asset: $_" }) -join "`n")
   }
@@ -795,7 +1020,7 @@ function Invoke-Validate {
   if ($schemaVersion -notin @(1, 2)) { throw "Unsupported release config schemaVersion: $schemaVersion" }
   if ($schemaVersion -eq 2) {
     $configuredProjectType = [string](Get-RequiredProperty $config "projectType" "root")
-    if ($configuredProjectType -notin @("tauri", "node", "go", "python", "rust", "dotnet", "java")) { throw "Unsupported projectType: $configuredProjectType" }
+    if ($configuredProjectType -notin @("tauri", "node", "go", "python", "rust", "dotnet", "java", "cmake", "flutter", "android", "electron", "docker")) { throw "Unsupported projectType: $configuredProjectType" }
   }
   foreach ($name in @("projectName", "branch", "remote")) { Get-RequiredProperty $config $name "root" | Out-Null }
 
@@ -851,6 +1076,12 @@ function Invoke-Validate {
     if ($workflow -notmatch '(?ms)^permissions:\s*\r?\n\s+contents:\s*write\s*$') { throw "Workflow must grant contents: write" }
     if ($workflow -notmatch '(?i)(releaseDraft:\s*true|gh\s+release\s+create[^\r\n]*(?:\r?\n[^\r\n]*)*?--draft)') {
       throw "Workflow must create a draft GitHub Release"
+    }
+    if ($configuredProjectType -eq "docker") {
+      if ($workflow -notmatch '(?ms)^permissions:\s*.*?^\s+packages:\s*write\s*$') { throw "Docker workflow must grant packages: write" }
+      if ($workflow -notmatch 'docker/build-push-action@v7' -or $workflow -notmatch '(?m)^\s+push:\s*true\s*$') {
+        throw "Docker workflow must push the generated image"
+      }
     }
 
     $expectedAssets = @([regex]::Matches($workflow, '(?m)^# Expected asset:\s*(?<name>\S.+?)\s*$') | ForEach-Object { $_.Groups["name"].Value })

@@ -17,7 +17,7 @@ $setup = "$env:USERPROFILE\.codex\skills\project-release-automator\scripts\setup
 - `Generate`：生成 schema v2 配置和标签触发的 GitHub Actions 工作流。
 - `Validate`：检查配置、版本源、工作流标记、标签触发器、权限、草稿 Release 和产物规则。
 
-`-ProjectType auto|tauri|node|go|python|rust|dotnet|java` 默认为 `auto`。Tauri 的识别优先级最高；其他项目存在多个生态清单时必须显式指定类型。
+`-ProjectType` 支持 `auto`、`tauri`、`node`、`go`、`python`、`rust`、`dotnet`、`java`、`cmake`、`flutter`、`android`、`electron` 和 `docker`。专用应用类型优先识别；其他项目存在多个生态清单时必须显式指定类型。
 
 生成的工作流首部包含以下托管标记：
 
@@ -101,7 +101,7 @@ $setup = "$env:USERPROFILE\.codex\skills\project-release-automator\scripts\setup
 ## 字段规则
 
 - `schemaVersion`：发布执行器兼容 `1` 和 `2`；自动生成器使用 `2`。
-- `projectType`：schema v2 生成配置使用 `tauri`、`node`、`go`、`python`、`rust`、`dotnet` 或 `java`。
+- `projectType`：schema v2 使用上述十二种项目类型之一。
 - `automation.generator`：自动生成配置固定为 `project-release-automator`。
 - `automation.template`：工作流模板标识，为 `<projectType>-v1`。
 - `automation.managedWorkflow`：为 `true` 时，`Validate` 强制校验托管标记和模板一致性。
@@ -163,6 +163,31 @@ $setup = "$env:USERPROFILE\.codex\skills\project-release-automator\scripts\setup
 
 - 支持根目录 Maven `pom.xml` 或 Gradle `build.gradle(.kts)` 的静态语义版本。
 - 优先使用 Maven/Gradle Wrapper，运行测试与构建后发布 `.jar`。
+
+### CMake
+
+- 从 `CMakeLists.txt` 读取 `project()` 和唯一的 `add_executable()` 目标。
+- 构建 Windows、Linux、macOS 的 x64/ARM64 六个平台压缩包。
+
+### Flutter
+
+- 从 `pubspec.yaml` 读取名称与版本。
+- 生成 APK、AAB、Windows、Linux、macOS Intel/Apple Silicon 和 Web 包。
+
+### Android
+
+- 识别唯一的 `com.android.application` 模块及 Gradle Wrapper。
+- 更新静态 `versionName`，构建未签名 APK 和 AAB；签名配置继续由项目管理。
+
+### Electron
+
+- 从 Electron 依赖和 package scripts 识别桌面项目。
+- 使用项目已有构建脚本，将六个平台输出整理为确定名称的压缩包。
+
+### Docker
+
+- Dockerfile 作为唯一主清单时自动识别；混合项目可显式指定 `-ProjectType docker`。
+- 构建并推送 `linux/amd64`、`linux/arm64` GHCR 镜像，发布带 digest 的文本清单。
 
 ## 最小无工作流示例
 
