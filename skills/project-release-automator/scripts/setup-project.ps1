@@ -11,7 +11,12 @@ param(
 
   [string]$ConfigPath = ".codex-release.json",
 
-  [string]$WorkflowPath = ".github/workflows/release.yml"
+  [string]$WorkflowPath = ".github/workflows/release.yml",
+
+  [ValidateSet("Stop", "CreateSeparate", "ReuseCompatible")]
+  [string]$ExistingWorkflowPolicy = "Stop",
+
+  [string]$SeparateWorkflowPath = ".github/workflows/project-release.yml"
 )
 
 $ErrorActionPreference = "Stop"
@@ -534,11 +539,17 @@ function Add-ExistingVersionUpdate([ref]$Updates, [string]$RelativePath, [string
 }
 
 function Get-ReleaseNotesConfig {
+  $heading =
+    "## " +
+    ([char]0x66F4).ToString() +
+    ([char]0x65B0).ToString() +
+    ([char]0x5185).ToString() +
+    ([char]0x5BB9).ToString()
   return [pscustomobject][ordered]@{
-    heading = "## Changes"
+    heading = $heading
     minItems = 2
     maxItems = 6
-    requireChinese = $false
+    requireChinese = $true
   }
 }
 
@@ -655,7 +666,11 @@ function Get-ExpectedAssets($Profile, [string]$Stem) {
   )
 }
 
-function New-GenerationBundle($Profile) {
+function New-GenerationBundle(
+  $Profile,
+  [string]$SelectedWorkflowPath = $WorkflowPath,
+  [bool]$ManagedWorkflow = $true
+) {
   $defaults = Get-RepositoryDefaults
   $stem = ConvertTo-ArtifactStem $Profile.ProjectName
   $updates = @()
@@ -827,8 +842,8 @@ function New-GenerationBundle($Profile) {
     automation = [pscustomobject][ordered]@{
       generator = $script:GeneratorName
       template = $templateName
-      managedWorkflow = $true
-      workflowFile = $WorkflowPath.Replace("\", "/")
+      managedWorkflow = $ManagedWorkflow
+      workflowFile = $SelectedWorkflowPath.Replace("\", "/")
     }
     projectName = $Profile.ProjectName
     branch = $defaults.Branch
@@ -948,6 +963,33 @@ function Assert-ManagedWorkflowOrAbsent([string]$Path) {
   }
 }
 
+function Test-ManagedWorkflow([string]$Path) {
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+  return [IO.File]::ReadAllText($Path).StartsWith($script:WorkflowMarker, [StringComparison]::Ordinal)
+}
+
+function Assert-CompatibleWorkflowContent([string]$Content, [string]$ProjectType) {
+  $workflowName = Get-WorkflowName $Content
+  if ($Content -notmatch '(?ms)^on:\s*\r?\n\s+push:\s*\r?\n\s+tags:') {
+    throw "Existing workflow is not compatible: tag push trigger is missing"
+  }
+  if ($Content -notmatch '(?ms)^permissions:\s*\r?\n\s+contents:\s*write\s*$') {
+    throw "Existing workflow is not compatible: contents write permission is missing"
+  }
+  if ($Content -notmatch '(?i)(releaseDraft:\s*true|gh\s+release\s+create[^\r\n]*(?:\r?\n[^\r\n]*)*?--draft)') {
+    throw "Existing workflow is not compatible: draft Release creation is missing"
+  }
+  if ($ProjectType -eq "docker") {
+    if ($Content -notmatch '(?ms)^permissions:\s*.*?^\s+packages:\s*write\s*$') {
+      throw "Existing Docker workflow is not compatible: packages write permission is missing"
+    }
+    if ($Content -notmatch 'docker/build-push-action@v7' -or $Content -notmatch '(?m)^\s+push:\s*true\s*$') {
+      throw "Existing Docker workflow is not compatible: image push is missing"
+    }
+  }
+  return $workflowName
+}
+
 function Write-AtomicUtf8([string]$Path, [string]$Content) {
   $directory = Split-Path -Parent $Path
   if (-not (Test-Path -LiteralPath $directory -PathType Container)) {
@@ -969,15 +1011,49 @@ function Write-AtomicUtf8([string]$Path, [string]$Content) {
 }
 
 function Invoke-Generate($Profile) {
-  $bundle = New-GenerationBundle $Profile
   $configFile = Resolve-RepositoryFile $ConfigPath
-  $workflowFile = Resolve-RepositoryFile $WorkflowPath
+  $selectedWorkflowPath = $WorkflowPath
+  $workflowFile = Resolve-RepositoryFile $selectedWorkflowPath
+  $reuseHumanWorkflow = $false
+  $humanWorkflowName = $null
+
+  if ((Test-Path -LiteralPath $workflowFile -PathType Leaf) -and -not (Test-ManagedWorkflow $workflowFile)) {
+    if ($ExistingWorkflowPolicy -eq "CreateSeparate") {
+      if ($SeparateWorkflowPath.Replace("\", "/") -eq $WorkflowPath.Replace("\", "/")) {
+        throw "Separate workflow path must differ from the existing workflow path"
+      }
+      $selectedWorkflowPath = $SeparateWorkflowPath
+      $workflowFile = Resolve-RepositoryFile $selectedWorkflowPath
+      if ((Test-Path -LiteralPath $workflowFile -PathType Leaf) -and -not (Test-ManagedWorkflow $workflowFile)) {
+        throw "Refusing to overwrite human-managed separate workflow: $workflowFile"
+      }
+      Write-Host "Preserving human workflow; using separate release workflow: $selectedWorkflowPath"
+    }
+    elseif ($ExistingWorkflowPolicy -eq "ReuseCompatible") {
+      $humanWorkflowName = Assert-CompatibleWorkflowContent ([IO.File]::ReadAllText($workflowFile)) $Profile.ProjectType
+      $reuseHumanWorkflow = $true
+      Write-Host "Reusing compatible human-managed workflow: $selectedWorkflowPath"
+    }
+    else {
+      throw "Refusing to overwrite human-managed workflow: $workflowFile"
+    }
+  }
+
+  $bundle = New-GenerationBundle $Profile $selectedWorkflowPath (-not $reuseHumanWorkflow)
+  if ($reuseHumanWorkflow) {
+    $bundle.Config.publish.workflow.name = $humanWorkflowName
+  }
   $configContent = ($bundle.Config | ConvertTo-Json -Depth 20) + "`n"
-  $workflowContent = Render-Template $bundle.TemplateFile $bundle.Tokens
-  if (-not $workflowContent.EndsWith("`n")) { $workflowContent += "`n" }
+  $workflowContent = $null
+  if (-not $reuseHumanWorkflow) {
+    $workflowContent = Render-Template $bundle.TemplateFile $bundle.Tokens
+    if (-not $workflowContent.EndsWith("`n")) { $workflowContent += "`n" }
+  }
 
   Assert-ManagedConfigOrAbsent $configFile
-  Assert-ManagedWorkflowOrAbsent $workflowFile
+  if (-not $reuseHumanWorkflow) {
+    Assert-ManagedWorkflowOrAbsent $workflowFile
+  }
   foreach ($additional in $bundle.AdditionalFiles) {
     $additionalPath = Resolve-RepositoryFile $additional.RelativePath
     if (Test-Path -LiteralPath $additionalPath -PathType Leaf) {
@@ -985,10 +1061,10 @@ function Invoke-Generate($Profile) {
     }
   }
 
-  $desired = @(
-    [pscustomobject]@{ Path = $configFile; Content = $configContent },
-    [pscustomobject]@{ Path = $workflowFile; Content = $workflowContent }
-  )
+  $desired = @([pscustomobject]@{ Path = $configFile; Content = $configContent })
+  if (-not $reuseHumanWorkflow) {
+    $desired += [pscustomobject]@{ Path = $workflowFile; Content = $workflowContent }
+  }
   foreach ($additional in $bundle.AdditionalFiles) {
     $desired += [pscustomobject]@{ Path = Resolve-RepositoryFile $additional.RelativePath; Content = $additional.Content }
   }

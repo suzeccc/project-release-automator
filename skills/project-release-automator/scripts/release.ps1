@@ -1,26 +1,27 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory)]
-  [ValidateSet("Plan", "Prepare", "Publish")]
+  [ValidateSet("LocalBuild", "Plan", "Prepare", "Publish")]
   [string]$Mode,
 
-  [Parameter(Mandatory)]
   [ValidatePattern('^v?\d+\.\d+\.\d+$')]
   [string]$Version,
 
-  [Parameter(Mandatory)]
-  [ValidateNotNullOrEmpty()]
   [string]$Summary,
 
   [string]$ReleaseNotes,
 
   [string]$RepositoryRoot = (Get-Location).Path,
 
-  [string]$ConfigPath = ".codex-release.json"
+  [string]$ConfigPath = ".codex-release.json",
+
+  [switch]$SkipBuild,
+
+  [switch]$AllowExistingHead
 )
 
 $ErrorActionPreference = "Stop"
-$normalizedVersion = $Version.TrimStart("v")
+$normalizedVersion = if ($Version) { $Version.TrimStart("v") } else { $null }
 $script:GitHubCli = $null
 $script:Config = $null
 $script:ResolvedRepositoryRoot = $null
@@ -33,8 +34,20 @@ if (-not (Test-Path -LiteralPath $utilsScript)) {
 }
 . $utilsScript
 
-if ($Summary -match "[`r`n]") {
+if ($Mode -ne "LocalBuild" -and -not $Version) {
+  throw "Version is required for $Mode"
+}
+if ($Mode -ne "LocalBuild" -and [string]::IsNullOrWhiteSpace($Summary)) {
+  throw "Summary is required for $Mode"
+}
+if ($Summary -and $Summary -match "[`r`n]") {
   throw "Summary must be one line"
+}
+if ($SkipBuild -and $Mode -ne "Prepare") {
+  throw "SkipBuild is only valid for Prepare"
+}
+if ($AllowExistingHead -and $Mode -ne "Publish") {
+  throw "AllowExistingHead is only valid for Publish"
 }
 
 function Invoke-Checked([string]$FilePath, [string[]]$Arguments) {
@@ -130,6 +143,9 @@ function Initialize-ReleaseContext {
   $script:ConfigFile = Assert-PathInsideRepository (Resolve-Path -LiteralPath $candidateConfig).Path
   $script:Config = Get-Content -Raw -Encoding UTF8 $script:ConfigFile | ConvertFrom-Json
   Assert-ReleaseConfig
+  if ($Mode -eq "LocalBuild" -and -not $normalizedVersion) {
+    $normalizedVersion = Get-CurrentVersion
+  }
   $tagPrefix = [string](Get-OptionalProperty $script:Config "tagPrefix" "v")
   $script:Tag = "$tagPrefix$normalizedVersion"
 }
@@ -179,13 +195,16 @@ function Assert-ReleaseConfig {
   }
 }
 
-function Assert-Repository {
+function Assert-RepositoryRoot {
   $gitRoot = Invoke-Captured "git" @("rev-parse", "--show-toplevel")
   $normalizedGitRoot = Get-NormalizedPath $gitRoot
   if (-not $normalizedGitRoot.Equals($script:ResolvedRepositoryRoot, [StringComparison]::OrdinalIgnoreCase)) {
     throw "Repository root mismatch: $gitRoot"
   }
+}
 
+function Assert-Repository {
+  Assert-RepositoryRoot
   $branch = Invoke-Captured "git" @("branch", "--show-current")
   if ($branch -ne [string]$script:Config.branch) {
     throw "Release requires branch $($script:Config.branch); current branch is $branch"
@@ -631,8 +650,14 @@ function Invoke-Prepare {
       throw "Project version does not match requested version after update"
     }
 
-    Invoke-ConfiguredCommands
-    $artifacts = @(Get-PreparedArtifacts)
+    $artifacts = @()
+    if ($SkipBuild) {
+      Write-Host "Local build is current; skipping configured build commands"
+    }
+    else {
+      Invoke-ConfiguredCommands
+      $artifacts = @(Get-PreparedArtifacts)
+    }
     Write-Host "Prepared $($script:Config.projectName) $($script:Tag)"
     if ($artifacts.Count -gt 0) {
       $artifacts | Format-List
@@ -641,6 +666,18 @@ function Invoke-Prepare {
   catch {
     Restore-VersionFiles $backup
     throw
+  }
+}
+
+function Invoke-LocalBuild {
+  Assert-RepositoryRoot
+  $currentVersion = Get-CurrentVersion
+  Write-Host "Local build: $($script:Config.projectName) $currentVersion"
+  Invoke-ConfiguredCommands
+  $artifacts = @(Get-PreparedArtifacts)
+  Write-Host "Local build completed without changing the project version"
+  if ($artifacts.Count -gt 0) {
+    $artifacts | Format-List
   }
 }
 
@@ -684,7 +721,7 @@ function Invoke-Publish {
   }
 
   $headSubject = Invoke-Captured "git" @("log", "-1", "--pretty=%s")
-  if ($headSubject -ne $Summary) {
+  if (-not $AllowExistingHead -and $headSubject -ne $Summary) {
     throw "HEAD subject does not match the release summary"
   }
 
@@ -734,7 +771,10 @@ $previousLocation = Get-Location
 try {
   Initialize-ReleaseContext
   Set-Location -LiteralPath $script:ResolvedRepositoryRoot
-  if ($Mode -eq "Plan") {
+  if ($Mode -eq "LocalBuild") {
+    Invoke-LocalBuild
+  }
+  elseif ($Mode -eq "Plan") {
     Invoke-Plan
   }
   elseif ($Mode -eq "Prepare") {

@@ -13,11 +13,37 @@ $setup = "$env:USERPROFILE\.codex\skills\project-release-automator\scripts\setup
 & $setup -Mode Validate -RepositoryRoot "<仓库根目录>"
 ```
 
-- `Detect`：只读识别 Tauri、Node.js 或 Go，并报告版本源、包管理器和构建入口。
+- `Detect`：只读识别支持的项目类型，并报告版本源、包管理器和构建入口。
 - `Generate`：生成 schema v2 配置和标签触发的 GitHub Actions 工作流。
 - `Validate`：检查配置、版本源、工作流标记、标签触发器、权限、草稿 Release 和产物规则。
 
 `-ProjectType` 支持 `auto`、`tauri`、`node`、`go`、`python`、`rust`、`dotnet`、`java`、`cmake`、`flutter`、`android`、`electron` 和 `docker`。专用应用类型优先识别；其他项目存在多个生态清单时必须显式指定类型。
+
+现有人工工作流通过 `-ExistingWorkflowPolicy` 处理：
+
+- `Stop`：默认停止，不写入任何文件。
+- `CreateSeparate`：保留人工工作流，创建 `.github/workflows/project-release.yml`。
+- `ReuseCompatible`：检查标签触发、写权限和草稿 Release；兼容后复用，并写入 `managedWorkflow: false`。
+
+## 用户操作入口
+
+统一脚本为 `scripts/invoke-release.ps1`：
+
+```powershell
+# 本地测试构建，不修改版本
+& .\scripts\invoke-release.ps1 -Operation LocalBuild
+
+# 提交更改区和暂存区的全部安全更改，并推送当前分支
+& .\scripts\invoke-release.ps1 -Operation CommitPush -Summary "一句中文总结"
+
+# 更新版本、提交推送、构建全部包并发布 GitHub
+& .\scripts\invoke-release.ps1 -Operation Release -Version v1.2.3 `
+  -Summary "一句中文总结" -ReleaseNotes "<中文 Release Notes>"
+```
+
+`LocalBuild` 调用 `prepare.commands`，但不运行 `version.updates`。成功后在 `.git/project-release-automator/local-build.json` 保存忽略发布版本值的源文件指纹、产物路径和 SHA256。正式发布仅在收据、指纹和所有产物哈希均有效时跳过本地构建。
+
+`CommitPush` 和 `Release` 明确执行全量暂存，包含已暂存、未暂存、删除和未跟踪文件，并遵守 `.gitignore`。提交前拒绝 Git 冲突、明显凭据文件、私钥和常见 Token；失败时恢复原暂存区。
 
 生成的工作流首部包含以下托管标记：
 

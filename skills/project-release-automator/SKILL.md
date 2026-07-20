@@ -1,11 +1,11 @@
 ---
 name: project-release-automator
-description: Detects and configures common application, library, native, mobile, desktop, and container repositories, then automates packaging and formal releases. Supports Tauri, Node.js, Go, Python, Rust, .NET, Java, CMake, Flutter, Android, Electron, and Docker. Use when the user asks to create or validate release automation, generate a tag-triggered GitHub Actions workflow, or says 打包, 发布, or 正式发布 followed by a semantic version such as v1.2.3.
+description: Detects and configures common application, library, native, mobile, desktop, and container repositories, then provides local test builds, commit-and-push, and formal GitHub releases. Supports Tauri, Node.js, Go, Python, Rust, .NET, Java, CMake, Flutter, Android, Electron, and Docker. Use when the user asks to build a local test program without changing its version, commit and push all changes with a Chinese summary, create or validate release automation, generate a tag-triggered GitHub Actions workflow, or formally publish a semantic version such as v1.2.3.
 ---
 
 # Project Release Automator
 
-把“打包 vX.Y.Z”视为用户对当前 Git 仓库执行本地构建、提交、推送、创建标签和正式发布的一次性授权。只执行 `.codex-release.json` 声明的项目步骤，不猜测或复用其他仓库的配置。
+只执行 `.codex-release.json` 声明的项目步骤，不猜测或复用其他仓库的配置。用户未明确操作时，显示 `LocalBuild`、`CommitPush`、`Release` 三项选择；不得把“本地打包”解释为正式发布。
 
 ## 初始化项目
 
@@ -34,7 +34,60 @@ $setup = "$env:USERPROFILE\.codex\skills\project-release-automator\scripts\setup
 
 生成后运行 `Validate`，再运行 `Plan`。在配置可解释且计划正确前不得进入 `Prepare`。
 
-## 发布顺序
+## 用户操作
+
+统一入口：
+
+```powershell
+$invoke = "$env:USERPROFILE\.codex\skills\project-release-automator\scripts\invoke-release.ps1"
+```
+
+### 1. LocalBuild
+
+用于本地测试，不修改版本，不提交、不推送：
+
+```powershell
+& $invoke -Operation LocalBuild -RepositoryRoot "<仓库根目录>"
+```
+
+执行配置中的本地测试和构建命令，在项目标准输出位置更新已有程序。成功后把源文件指纹、产物路径和 SHA256 写入 `.git/project-release-automator/local-build.json`；该状态不进入 Git。
+
+### 2. CommitPush
+
+检查冲突和疑似密钥后，把更改区、暂存区、删除和未跟踪文件全部提交，并推送当前分支：
+
+```powershell
+& $invoke -Operation CommitPush -Summary "一句中文总结" -RepositoryRoot "<仓库根目录>"
+```
+
+根据完整差异生成单行中文 `Summary`。本操作明确允许等价于 `git add -A` 的全量暂存，但仍遵守 `.gitignore`；发现 `.env`、私钥、凭据文件或密钥内容时停止并恢复原暂存区。远程领先或分叉时停止，不自动合并或变基。
+
+### 3. Release
+
+正式发布要求稳定语义版本、单行中文总结和中文 Release Notes：
+
+```powershell
+$notes = @"
+## 更新内容
+
+- 新增：第一项用户可感知变化。
+- 修复：第二项用户可感知变化。
+"@
+
+& $invoke -Operation Release -Version vX.Y.Z -Summary "一句中文总结" `
+  -ReleaseNotes $notes -RepositoryRoot "<仓库根目录>"
+```
+
+依次执行 `Plan -> Prepare -> Commit -> Publish`：更新版本、必要时本地构建、全量安全提交、原子推送分支和标签、等待 GitHub Actions、校验全部产物并公开草稿 Release。若本地构建收据、源文件指纹和产物 SHA256 全部有效，则跳过本地程序构建；GitHub Actions 仍重新构建正式发布包。
+
+工作流已存在时：
+
+- Skill 托管工作流：更新或复用。
+- 兼容的人工发布工作流：用 `-WorkflowPolicy ReuseCompatible` 复用并设为非托管。
+- 不兼容或普通 CI：用 `-WorkflowPolicy CreateSeparate` 保留原文件并创建 `.github/workflows/project-release.yml`。
+- 未选择策略：默认 `Stop`，绝不覆盖人工工作流。
+
+## 底层发布顺序
 
 严格按 Plan、Prepare、Publish 执行，不得跳过验证。
 
@@ -53,7 +106,7 @@ $setup = "$env:USERPROFILE\.codex\skills\project-release-automator\scripts\setup
 - `Summary`：单行中文提交/标签总结。
 - `ReleaseNotes`：以配置中的标题开头，列出配置要求数量的中文用户可感知重点。
 
-若存在未提交修改，只暂存当前任务明确相关的文件。来源不明、无关或冲突的修改必须暂停并询问用户。禁止使用 `git add .`、`git add -A` 或等价全量暂存。
+底层 `Plan` 不暂存文件。只有用户选择 `CommitPush` 或 `Release` 时才允许全量暂存；其他上下文禁止使用 `git add .`、`git add -A` 或等价操作。
 
 ### 2. Prepare
 
@@ -67,7 +120,7 @@ $setup = "$env:USERPROFILE\.codex\skills\project-release-automator\scripts\setup
 
 脚本按配置同步版本、运行测试和构建、整理产物并校验 SHA256。任一步骤失败时立即停止并回滚脚本引入的版本文件修改；并行任务失败时终止本次启动的兄弟进程。
 
-成功后重新检查差异，只用显式路径暂存当前任务文件和版本文件。不要暂存配置排除的构建目录、密钥或 Token。用 `Summary` 提交；若版本已是目标值且没有新文件变化，可用 `git commit --allow-empty` 创建发布标记提交。
+成功后由统一入口重新检查完整差异和敏感文件。没有文件变化时不创建空提交；`Publish` 可在现有 `HEAD` 上创建标签。
 
 ### 3. Publish
 
