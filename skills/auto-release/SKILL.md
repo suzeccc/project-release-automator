@@ -9,11 +9,12 @@ description: Detects and configures common application, library, native, mobile,
 
 ## 初始化项目
 
-在仓库根目录运行独立的初始化器。`Detect` 只读，`Generate` 创建配置和工作流，`Validate` 检查二者的一致性：
+在仓库根目录运行独立的初始化器。`Detect` 只读，`GenerateLocal` 只创建本地构建配置，`Generate` 创建完整配置和工作流，`Validate` 检查现有配置：
 
 ```powershell
 $setup = "$env:USERPROFILE\.codex\skills\auto-release\scripts\setup-project.ps1"
 & $setup -Mode Detect -RepositoryRoot "<仓库根目录>"
+& $setup -Mode GenerateLocal -RepositoryRoot "<仓库根目录>"
 & $setup -Mode Generate -RepositoryRoot "<仓库根目录>"
 & $setup -Mode Validate -RepositoryRoot "<仓库根目录>"
 ```
@@ -50,7 +51,9 @@ $invoke = "$env:USERPROFILE\.codex\skills\auto-release\scripts\invoke-release.ps
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File $invoke -Operation LocalBuild -RepositoryRoot "<仓库根目录>"
 ```
 
-只校验本地版本源、构建命令和产物，不得因 GitHub 工作流缺少标签触发器而阻止 `LocalBuild`。执行配置中的本地测试和构建命令，保留构建工具的原始产物，并统一复制到 `<仓库根目录>/output/<项目名><扩展名>`。`output` 目录或目标文件不存在时自动创建，已存在时覆盖；文件名不带版本号。若源 EXE 或统一输出 EXE 正在运行，必须按完整路径强制终止对应进程并等待退出，再构建或覆盖；禁止因文件占用创建 `-2`、`-3` 等备用文件。多种扩展名分别保留，单次构建确有多个同扩展名产物时才追加序号。成功后把源文件指纹、统一产物路径和 SHA256 写入 `.git/auto-release/local-build.json`；该状态不进入 Git，并兼容读取旧目录中的收据。
+只校验本地版本源、构建命令和产物，不得因 GitHub 工作流缺少标签触发器而阻止 `LocalBuild`。首次使用时调用 `GenerateLocal`，不得读取、覆盖或创建 GitHub 工作流；用户以后选择 `Release` 时再升级为完整发布配置。执行 `prepare.localCommands`；旧配置未声明时回退到 `prepare.commands`。先按 `prepare.bootstrapInputs` 和依赖命令计算缓存，仅在输入变化时执行 `prepare.bootstrapCommands`。保留构建工具的原始产物，并统一复制到 `<仓库根目录>/output/<项目名><扩展名>`。`output` 目录或目标文件不存在时自动创建，已存在时覆盖；文件名不带版本号。
+
+默认先验证 `.git/auto-release/local-build.json` 的源码指纹和产物 SHA256，全部有效时直接复用；用户明确要求重新打包时传入 `-ForceRebuild`。只按完整路径终止当前配置产物或上次收据记录的 EXE，不得遍历并终止 `output` 中的无关程序。构建后只记录底层执行器返回的本次产物清单，清理上次由 Skill 管理但本次不再生成的旧输出；禁止因文件占用创建 `-2`、`-3` 等备用文件。状态文件不进入 Git，并兼容读取旧目录中的收据。
 
 ### 2. CommitPush
 
@@ -61,6 +64,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $invoke -Operation Commi
 ```
 
 根据完整差异生成单行中文 `Summary`。本操作明确允许等价于 `git add -A` 的全量暂存，但仍遵守 `.gitignore`；发现 `.env`、私钥、凭据文件或密钥内容时停止并恢复原暂存区。远程领先或分叉时停止，不自动合并或变基。
+即使 `.codex-release.json` 的发布分支与当前分支不同，也必须提交并推送当前分支；配置分支只约束正式 `Release`。
 
 ### 3. Release
 
@@ -78,7 +82,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $invoke -Operation Relea
   -ReleaseNotes $notes -RepositoryRoot "<仓库根目录>"
 ```
 
-依次执行 `Plan -> Prepare -> Commit -> Publish`：更新版本、必要时本地构建、全量安全提交、原子推送分支和标签、等待 GitHub Actions、校验全部产物并公开草稿 Release。若本地构建收据、源文件指纹和产物 SHA256 全部有效，则跳过本地程序构建；GitHub Actions 仍重新构建正式发布包。
+依次执行 `Plan -> Prepare -> Commit -> Publish`：更新版本、必要时本地构建、全量安全提交、原子推送分支和标签、等待 GitHub Actions、校验全部产物并公开草稿 Release。若本地构建收据、源文件指纹和产物 SHA256 全部有效，则跳过本地程序构建；提交前必须再次验证指纹。构建期间源码变化时用新状态重建一次，仍持续变化则停止。GitHub Actions 始终重新构建正式发布包。
 
 工作流已存在时：
 

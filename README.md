@@ -31,11 +31,12 @@ python -X utf8 "$env:USERPROFILE\.codex\skills\.system\skill-installer\scripts\i
 ```powershell
 $setup = "$env:USERPROFILE\.codex\skills\auto-release\scripts\setup-project.ps1"
 & $setup -Mode Detect -RepositoryRoot "<仓库根目录>"
+& $setup -Mode GenerateLocal -RepositoryRoot "<仓库根目录>"
 & $setup -Mode Generate -RepositoryRoot "<仓库根目录>"
 & $setup -Mode Validate -RepositoryRoot "<仓库根目录>"
 ```
 
-生成器支持 Tauri、Node.js、Go、Python、Rust、.NET、Java、CMake、Flutter、Android、Electron 和 Docker，创建项目级 `.codex-release.json` 与标签触发的 `.github/workflows/release.yml`。若工作流由人工维护，生成器会拒绝覆盖。完整字段说明见 [`skills/auto-release/references/config.md`](skills/auto-release/references/config.md)。
+生成器支持 Tauri、Node.js、Go、Python、Rust、.NET、Java、CMake、Flutter、Android、Electron 和 Docker。`GenerateLocal` 只创建本地构建配置，不读取或创建 GitHub 工作流；`Generate` 创建完整 `.codex-release.json` 与标签触发的 `.github/workflows/release.yml`。若工作流由人工维护，完整生成器会拒绝覆盖。完整字段说明见 [`skills/auto-release/references/config.md`](skills/auto-release/references/config.md)。
 
 ## 三种操作
 
@@ -45,6 +46,9 @@ $invoke = "$env:USERPROFILE\.codex\skills\auto-release\scripts\invoke-release.ps
 # 1. 不改版本，仅构建本地测试程序
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File $invoke -Operation LocalBuild -RepositoryRoot "<仓库根目录>"
 
+# 忽略已有有效构建记录，强制重新构建；依赖仍仅在锁文件变化时重新安装
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $invoke -Operation LocalBuild -ForceRebuild -RepositoryRoot "<仓库根目录>"
+
 # 2. 中文提交全部更改并推送当前分支
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File $invoke -Operation CommitPush -Summary "一句中文总结" -RepositoryRoot "<仓库根目录>"
 
@@ -53,7 +57,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $invoke -Operation Relea
   -ReleaseNotes "<中文 Release Notes>" -RepositoryRoot "<仓库根目录>"
 ```
 
-`LocalBuild` 只校验本地版本、命令和产物配置，不要求 GitHub 工作流具备标签触发器。它会自动创建 `<仓库根目录>/output`，把本地构建产物复制为不含版本号的 `output/<项目名><扩展名>`；例如 `output/CopyShare.exe`。若同路径的 EXE 正在运行，先按完整路径强制终止占用进程，再覆盖标准文件，禁止改用 `-2` 等备用文件名。构建工具的原始产物仍保留，同时在 `.git/auto-release/local-build.json` 保存构建指纹。正式发布时源文件和产物未变化即可跳过重复的本地构建，但 GitHub Actions 仍会重新生成正式发布包。
+`LocalBuild` 只校验本地版本、命令和产物配置，不要求 GitHub 工作流具备标签触发器。它会自动创建 `<仓库根目录>/output`，把本地构建产物复制为不含版本号的 `output/<项目名><扩展名>`；例如 `output/CopyShare.exe`。若该项目当前或上次管理的同路径 EXE 正在运行，先按完整路径强制终止对应进程，再覆盖标准文件；不会终止 `output` 中的其他程序，也不会改用 `-2` 等备用文件名。构建记录只包含本次实际生成的产物，并清理上次由 Skill 管理、这次已不再生成的旧文件。
+
+默认情况下，源码和产物 SHA256 未变化时直接复用现有结果；使用 `-ForceRebuild` 可强制重新构建。新生成的配置把依赖安装、快速本地构建和完整正式构建分开：锁文件未变化时跳过依赖安装，Tauri 本地构建使用无安装包模式，正式发布仍生成全部安装包。正式发布在提交前会再次核对源码指纹，构建期间发生变化时自动重建一次，持续变化则停止发布。GitHub Actions 始终重新生成正式发布包。
 
 人工工作流默认不覆盖：可选择兼容复用，或保留原工作流并新建 `.github/workflows/auto-release.yml`。
 
@@ -66,6 +72,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $invoke -Operation Relea
 - 本地构建不改版本；全量中文提交推送；正式发布三种独立操作
 - 本地构建统一输出到 `output/<项目名><扩展名>`，目录或文件不存在时自动创建
 - 基于源文件指纹和 SHA256 复用有效本地构建
+- 基于锁文件缓存依赖安装，区分快速本地构建和完整正式构建
+- 精确记录本次产物，只终止和清理当前项目已管理的程序
+- 正式发布提交前重新验证构建输入，避免旧产物对应新源码
 - 兼容复用人工工作流，或保留原文件创建独立发布工作流
 - Tauri 五平台、Go 六目标和 Node.js `.tgz` 发布矩阵
 - 项目级版本读取和多文件正则更新

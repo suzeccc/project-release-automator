@@ -305,6 +305,10 @@ try {
   Assert-Equal $nodeConfig.schemaVersion 2 "Node config does not use schema v2"
   Assert-Equal $nodeConfig.automation.template "node-v1" "Node config uses the wrong template"
   Assert-Equal $nodeConfig.prepare.localOutputDirectory "output" "Node config does not use the unified local output directory"
+  Assert-Equal @($nodeConfig.prepare.bootstrapCommands).Count 1 "Node dependency installation was not separated from build commands"
+  Assert-Match ([string]$nodeConfig.prepare.bootstrapCommands[0].command) 'npm ci' "Node bootstrap does not use the detected lock file"
+  Assert-Equal ([string]$nodeConfig.prepare.bootstrapRequiredPaths[0]) "node_modules" "Node bootstrap cache does not verify installed dependencies"
+  Assert-Equal (@($nodeConfig.prepare.localCommands).Count) (@($nodeConfig.prepare.commands).Count) "Node local command set does not preserve build checks"
   Assert-Equal @($nodeConfig.version.updates).Count 3 "Node config did not constrain all root version entries"
   $nodeConfigHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $nodeConfigPath).Hash
   $nodeWorkflowHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $nodeWorkflowPath).Hash
@@ -371,6 +375,8 @@ version = "2.3.4"
   $tauriConfig = Get-Content -Raw -Encoding UTF8 (Join-Path $tauriRoot ".codex-release.json") | ConvertFrom-Json
   Assert-Equal $tauriConfig.automation.template "tauri-v1" "Tauri config uses the wrong template"
   Assert-Equal @($tauriConfig.publish.release.requiredAssets).Count 6 "Tauri config does not validate all platform bundles"
+  Assert-Match ([string]$tauriConfig.prepare.localCommands[-1].command) 'no-bundle' "Tauri local build still creates full installers"
+  if ([string]$tauriConfig.prepare.commands[-1].command -match 'no-bundle') { throw "Tauri formal build incorrectly disables installer bundles" }
   $tauriWorkflow = Get-Content -Raw -Encoding UTF8 (Join-Path $tauriRoot ".github\workflows\release.yml")
   Assert-Match $tauriWorkflow 'windows-11-arm' "Tauri workflow is missing Windows ARM64"
   Assert-Match $tauriWorkflow 'x86_64-apple-darwin' "Tauri workflow is missing macOS Intel"
@@ -678,6 +684,43 @@ finally {
   Remove-TestDirectory $humanWorkflowRoot
 }
 
+$localOnlyRoot = New-TestDirectory "local-only"
+try {
+  Write-TestUtf8 (Join-Path $localOnlyRoot "package.json") '{"name":"local-only","version":"1.0.0"}'
+  $localOnlyWorkflow = @'
+name: Human CI
+on: workflow_dispatch
+jobs: {}
+'@
+  $localOnlyWorkflowPath = Join-Path $localOnlyRoot ".github\workflows\release.yml"
+  Write-TestUtf8 $localOnlyWorkflowPath $localOnlyWorkflow
+  $workflowHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $localOnlyWorkflowPath).Hash
+  & $setupScript -Mode GenerateLocal -RepositoryRoot $localOnlyRoot
+  $localOnlyConfig = Get-Content -Raw -Encoding UTF8 (Join-Path $localOnlyRoot ".codex-release.json") | ConvertFrom-Json
+  Assert-Equal $localOnlyConfig.automation.localOnly $true "GenerateLocal did not mark the local-only config"
+  Assert-Equal $localOnlyConfig.automation.managedWorkflow $false "GenerateLocal incorrectly marked a release workflow as managed"
+  Assert-Equal $localOnlyConfig.publish.release.mode "none" "GenerateLocal enabled GitHub publication"
+  if ($localOnlyConfig.publish.workflow) { throw "GenerateLocal configured a GitHub workflow" }
+  Assert-Equal (Get-FileHash -Algorithm SHA256 -LiteralPath $localOnlyWorkflowPath).Hash $workflowHash "GenerateLocal changed a human workflow"
+  if (Test-Path -LiteralPath (Join-Path $localOnlyRoot ".github\workflows\auto-release.yml")) {
+    throw "GenerateLocal created a release workflow"
+  }
+  $localConfigHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $localOnlyRoot ".codex-release.json")).Hash
+  & $setupScript -Mode GenerateLocal -RepositoryRoot $localOnlyRoot
+  Assert-Equal (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $localOnlyRoot ".codex-release.json")).Hash $localConfigHash "GenerateLocal is not idempotent"
+  & $setupScript -Mode Generate -RepositoryRoot $localOnlyRoot -ExistingWorkflowPolicy CreateSeparate
+  $upgradedLocalConfig = Get-Content -Raw -Encoding UTF8 (Join-Path $localOnlyRoot ".codex-release.json") | ConvertFrom-Json
+  if ($upgradedLocalConfig.automation.localOnly) { throw "Full generation did not remove the local-only marker" }
+  Assert-Equal $upgradedLocalConfig.publish.release.mode "publish-draft" "Local-only config did not upgrade to formal publication"
+  if (-not (Test-Path -LiteralPath (Join-Path $localOnlyRoot ".github\workflows\auto-release.yml") -PathType Leaf)) {
+    throw "Local-only config upgrade did not create a separate release workflow"
+  }
+  Assert-Equal (Get-FileHash -Algorithm SHA256 -LiteralPath $localOnlyWorkflowPath).Hash $workflowHash "Local-only upgrade changed the human workflow"
+}
+finally {
+  Remove-TestDirectory $localOnlyRoot
+}
+
 $separateWorkflowRoot = New-TestDirectory "separate-workflow"
 try {
   Write-TestUtf8 (Join-Path $separateWorkflowRoot "package.json") '{"name":"separate","version":"1.0.0"}'
@@ -805,8 +848,15 @@ try {
   },
   "prepare": {
     "parallel": false,
-    "commands": [
+    "bootstrapInputs": ["package.json"],
+    "bootstrapCommands": [
+      {"name":"Bootstrap once","command":"if exist bootstrap-count.txt (echo twice>bootstrap-count.txt) else (echo once>bootstrap-count.txt)"}
+    ],
+    "localCommands": [
       {"name":"Build local program","command":"if not exist dist mkdir dist && echo local>dist\\local-app.exe"}
+    ],
+    "commands": [
+      {"name":"Build release program","command":"if not exist dist mkdir dist && echo release>dist\\local-app.exe"}
     ],
     "artifacts": [
       {
@@ -844,6 +894,7 @@ jobs: {}
   $unifiedLocalProgram = Join-Path $operationsRoot "output\local-app.exe"
   if (-not (Test-Path -LiteralPath $unifiedLocalProgram -PathType Leaf)) { throw "LocalBuild did not create the unified local output" }
   Assert-Equal (Get-Content -Raw -Encoding UTF8 $unifiedLocalProgram).Trim() "local" "Unified local output has the wrong content"
+  Assert-Equal (Get-Content -Raw -Encoding UTF8 (Join-Path $operationsRoot "bootstrap-count.txt")).Trim() "once" "LocalBuild did not run the initial dependency bootstrap"
   if (Test-Path -LiteralPath (Join-Path $operationsRoot "release\v1.0.0\local-app.exe")) {
     throw "LocalBuild incorrectly used the versioned release destination"
   }
@@ -851,18 +902,39 @@ jobs: {}
   $localReceipt = Get-Content -Raw -Encoding UTF8 (Join-Path $operationsRoot ".git\auto-release\local-build.json") | ConvertFrom-Json
   Assert-Equal $localReceipt.artifacts[0].path "output/local-app.exe" "Local build receipt did not record the unified output"
 
+  $staleManagedProgram = Join-Path $operationsRoot "output\local-app-old.exe"
+  Copy-Item -LiteralPath $unifiedLocalProgram -Destination $staleManagedProgram
+  $localReceipt.artifacts += [pscustomobject]@{
+    path = "output/local-app-old.exe"
+    sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $staleManagedProgram).Hash
+  }
+  Write-TestUtf8 (Join-Path $operationsRoot ".git\auto-release\local-build.json") (($localReceipt | ConvertTo-Json -Depth 10) + "`n")
+
   $lockingProcess = $null
+  $unrelatedProcess = $null
   try {
     Copy-Item -LiteralPath (Join-Path $env:WINDIR "System32\PING.EXE") -Destination $unifiedLocalProgram -Force
+    $unrelatedProgram = Join-Path $operationsRoot "output\unrelated.exe"
+    Copy-Item -LiteralPath (Join-Path $env:WINDIR "System32\PING.EXE") -Destination $unrelatedProgram -Force
     $lockingProcess = Start-Process -FilePath $unifiedLocalProgram -ArgumentList @("-n", "60", "127.0.0.1") -WindowStyle Hidden -PassThru
+    $unrelatedProcess = Start-Process -FilePath $unrelatedProgram -ArgumentList @("-n", "60", "127.0.0.1") -WindowStyle Hidden -PassThru
     Start-Sleep -Milliseconds 500
     $lockingProcess.Refresh()
+    $unrelatedProcess.Refresh()
     if ($lockingProcess.HasExited) { throw "Locking fixture process exited before LocalBuild" }
+    if ($unrelatedProcess.HasExited) { throw "Unrelated fixture process exited before LocalBuild" }
 
     & $invokeScript -Operation LocalBuild -RepositoryRoot $operationsRoot
     $lockingProcess.Refresh()
+    $unrelatedProcess.Refresh()
     if (-not $lockingProcess.HasExited) { throw "LocalBuild did not stop the process using the unified output" }
+    if ($unrelatedProcess.HasExited) { throw "LocalBuild stopped an unrelated executable from the output directory" }
     Assert-Equal (Get-Content -Raw -Encoding UTF8 $unifiedLocalProgram).Trim() "local" "LocalBuild did not overwrite the unlocked canonical output"
+    Assert-Equal (Get-Content -Raw -Encoding UTF8 (Join-Path $operationsRoot "bootstrap-count.txt")).Trim() "once" "LocalBuild reran unchanged dependency bootstrap commands"
+    if (Test-Path -LiteralPath $staleManagedProgram) { throw "LocalBuild did not remove a stale managed artifact" }
+    $updatedReceipt = Get-Content -Raw -Encoding UTF8 (Join-Path $operationsRoot ".git\auto-release\local-build.json") | ConvertFrom-Json
+    Assert-Equal (@($updatedReceipt.artifacts).Count) 1 "Local build receipt included stale or unrelated output files"
+    Assert-Equal $updatedReceipt.artifacts[0].path "output/local-app.exe" "Local build receipt did not use the exact artifact manifest"
     if (Test-Path -LiteralPath (Join-Path $operationsRoot "output\local-app-2.exe")) {
       throw "LocalBuild created a numeric fallback instead of replacing the occupied canonical output"
     }
@@ -874,6 +946,30 @@ jobs: {}
         Stop-Process -Id $lockingProcess.Id -Force -ErrorAction SilentlyContinue
       }
     }
+    if ($unrelatedProcess) {
+      $unrelatedProcess.Refresh()
+      if (-not $unrelatedProcess.HasExited) {
+        Stop-Process -Id $unrelatedProcess.Id -Force -ErrorAction SilentlyContinue
+      }
+    }
+  }
+
+  $reuseReceiptTimestamp = [DateTime]::Parse(
+    [string](Get-Content -Raw -Encoding UTF8 (Join-Path $operationsRoot ".git\auto-release\local-build.json") | ConvertFrom-Json).builtAtUtc
+  )
+  Start-Sleep -Milliseconds 1100
+  & $invokeScript -Operation LocalBuild -RepositoryRoot $operationsRoot
+  $afterReuseTimestamp = [DateTime]::Parse(
+    [string](Get-Content -Raw -Encoding UTF8 (Join-Path $operationsRoot ".git\auto-release\local-build.json") | ConvertFrom-Json).builtAtUtc
+  )
+  Assert-Equal $afterReuseTimestamp $reuseReceiptTimestamp "LocalBuild did not reuse a fresh verified output"
+  Start-Sleep -Milliseconds 1100
+  & $invokeScript -Operation LocalBuild -RepositoryRoot $operationsRoot -ForceRebuild
+  $afterForceTimestamp = [DateTime]::Parse(
+    [string](Get-Content -Raw -Encoding UTF8 (Join-Path $operationsRoot ".git\auto-release\local-build.json") | ConvertFrom-Json).builtAtUtc
+  )
+  if ($afterForceTimestamp -le $reuseReceiptTimestamp) {
+    throw "ForceRebuild did not rebuild the local output"
   }
 
   Remove-Item -LiteralPath (Join-Path $operationsRoot "dist\local-app.exe") -Force
@@ -894,6 +990,17 @@ jobs: {}
   $localHead = git -C $operationsRoot rev-parse HEAD
   $remoteHead = (git -C $operationsRoot ls-remote origin refs/heads/main).Split("`t")[0]
   Assert-Equal $remoteHead $localHead "CommitPush did not push the current branch"
+
+  $mainHead = $localHead
+  & git -C $operationsRoot switch -c feature/commit-push | Out-Null
+  Write-TestUtf8 (Join-Path $operationsRoot "feature.txt") "feature`n"
+  $featureSummary = "$newLabel feature branch"
+  & $invokeScript -Operation CommitPush -Summary $featureSummary -RepositoryRoot $operationsRoot
+  $featureHead = git -C $operationsRoot rev-parse HEAD
+  $remoteFeatureHead = (git -C $operationsRoot ls-remote origin refs/heads/feature/commit-push).Split("`t")[0]
+  Assert-Equal $remoteFeatureHead $featureHead "CommitPush used the configured release branch instead of the current branch"
+  $remoteMainHead = (git -C $operationsRoot ls-remote origin refs/heads/main).Split("`t")[0]
+  Assert-Equal $remoteMainHead $mainHead "CommitPush unexpectedly changed the configured release branch"
 
   Write-TestUtf8 (Join-Path $operationsRoot ".env") "TOKEN=secret`n"
   Assert-Throws {
@@ -961,6 +1068,7 @@ Assert-Match $invokeSource 'possible secret file' "CommitPush lacks secret path 
 Assert-Match $invokeSource 'sourceFingerprint' "Release lacks local build freshness tracking"
 Assert-Match $invokeSource 'AllowExistingHead' "Release does not support unchanged working trees"
 Assert-Match $invokeSource 'RequestedOperation -eq "LocalBuild"' "LocalBuild does not bypass GitHub workflow validation"
+Assert-Match $invokeSource 'Mode GenerateLocal' "First-time LocalBuild still creates a GitHub release workflow"
 foreach ($template in $workflowTemplates) {
   $templateSource = Get-Content -Raw -Encoding UTF8 $template
   Assert-Match $templateSource '^# Generated by Auto Release' "workflow template lacks managed marker"

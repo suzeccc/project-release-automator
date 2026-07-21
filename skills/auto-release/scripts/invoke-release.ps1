@@ -23,7 +23,9 @@ param(
 
   [string]$WorkflowPath = ".github/workflows/release.yml",
 
-  [string]$SeparateWorkflowPath = ".github/workflows/auto-release.yml"
+  [string]$SeparateWorkflowPath = ".github/workflows/auto-release.yml",
+
+  [switch]$ForceRebuild
 )
 
 $ErrorActionPreference = "Stop"
@@ -130,16 +132,21 @@ function Disable-StaleLoopbackProxy {
   }
 }
 
-function Get-BranchAndRemote($Config) {
-  $branch = if ($Config) { [string]$Config.branch } else { Invoke-GitCaptured @("branch", "--show-current") }
+function Get-BranchAndRemote($Config, [bool]$UseConfiguredBranch = $true) {
+  $branch = if ($UseConfiguredBranch -and $Config) {
+    [string]$Config.branch
+  }
+  else {
+    Invoke-GitCaptured @("branch", "--show-current")
+  }
   if (-not $branch) { throw "Detached HEAD is not supported" }
   $remote = if ($Config) { [string]$Config.remote } else { "origin" }
   if (-not $remote) { $remote = "origin" }
   return [pscustomobject]@{ Branch = $branch; Remote = $remote }
 }
 
-function Assert-RemoteReady($Config) {
-  $target = Get-BranchAndRemote $Config
+function Assert-RemoteReady($Config, [bool]$UseConfiguredBranch = $true) {
+  $target = Get-BranchAndRemote $Config $UseConfiguredBranch
   Invoke-GitCaptured @("remote", "get-url", $target.Remote) | Out-Null
   Disable-StaleLoopbackProxy
   $remoteHead = Invoke-GitCaptured @("ls-remote", "--heads", $target.Remote, "refs/heads/$($target.Branch)")
@@ -197,16 +204,23 @@ function Assert-NoStagedSecrets {
   }
 }
 
-function Commit-AllChanges([bool]$Push) {
+function Commit-AllChanges(
+  [bool]$Push,
+  [string]$ExpectedSourceFingerprint = "",
+  [bool]$UseConfiguredBranch = $true
+) {
   Assert-ChineseSummary $Summary
   Assert-NoConflicts
   $config = Read-ReleaseConfig
-  $remoteState = Assert-RemoteReady $config
+  $remoteState = Assert-RemoteReady $config $UseConfiguredBranch
   $indexBackup = Backup-GitIndex
   $committed = $false
   try {
     Invoke-GitChecked @("add", "-A")
     Assert-NoStagedSecrets
+    if ($ExpectedSourceFingerprint -and (Get-SourceFingerprint $config) -ne $ExpectedSourceFingerprint) {
+      throw "Source files changed after the verified build; release stopped before commit"
+    }
     & git -C $script:ResolvedRepositoryRoot diff --cached --quiet
     $hasChanges = $LASTEXITCODE -eq 1
     if ($LASTEXITCODE -notin @(0, 1)) { throw "git diff --cached --quiet failed" }
@@ -247,9 +261,15 @@ function Ensure-ReleaseAutomation([string]$RequestedOperation) {
   if (-not (Test-Path -LiteralPath $setupScript -PathType Leaf)) { throw "Setup script missing: $setupScript" }
   $config = Read-ReleaseConfig
   if (-not $config) {
-    & $setupScript -Mode Generate -ProjectType $ProjectType -RepositoryRoot $script:ResolvedRepositoryRoot `
-      -ConfigPath $ConfigPath -WorkflowPath $WorkflowPath `
-      -ExistingWorkflowPolicy $WorkflowPolicy -SeparateWorkflowPath $SeparateWorkflowPath
+    if ($RequestedOperation -eq "LocalBuild") {
+      & $setupScript -Mode GenerateLocal -ProjectType $ProjectType -RepositoryRoot $script:ResolvedRepositoryRoot `
+        -ConfigPath $ConfigPath -WorkflowPath $WorkflowPath
+    }
+    else {
+      & $setupScript -Mode Generate -ProjectType $ProjectType -RepositoryRoot $script:ResolvedRepositoryRoot `
+        -ConfigPath $ConfigPath -WorkflowPath $WorkflowPath `
+        -ExistingWorkflowPolicy $WorkflowPolicy -SeparateWorkflowPath $SeparateWorkflowPath
+    }
     return Read-ReleaseConfig
   }
 
@@ -260,7 +280,14 @@ function Ensure-ReleaseAutomation([string]$RequestedOperation) {
 
   $updateManaged = $RequestedOperation -eq "Release"
   $settings = Get-WorkflowSettings $config
-  if ($updateManaged -and $settings.Managed -and $settings.Generator -in @("auto-release", "project-release-automator")) {
+  $automation = Get-OptionalProperty $config "automation"
+  $localOnly = [bool](Get-OptionalProperty $automation "localOnly" $false)
+  if ($updateManaged -and $localOnly -and $settings.Generator -in @("auto-release", "project-release-automator")) {
+    & $setupScript -Mode Generate -ProjectType $settings.ProjectType -RepositoryRoot $script:ResolvedRepositoryRoot `
+      -ConfigPath $ConfigPath -WorkflowPath $settings.Path `
+      -ExistingWorkflowPolicy $WorkflowPolicy -SeparateWorkflowPath $SeparateWorkflowPath
+  }
+  elseif ($updateManaged -and $settings.Managed -and $settings.Generator -in @("auto-release", "project-release-automator")) {
     & $setupScript -Mode Generate -ProjectType $settings.ProjectType -RepositoryRoot $script:ResolvedRepositoryRoot `
       -ConfigPath $ConfigPath -WorkflowPath $settings.Path -ExistingWorkflowPolicy Stop
   }
@@ -341,6 +368,27 @@ function Get-ReceiptPath([string]$DirectoryName = "auto-release", [bool]$CreateD
   return Join-Path $directory "local-build.json"
 }
 
+function Read-LocalBuildReceipt {
+  $path = Get-ReceiptPath "auto-release" $false
+  if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+    $path = Get-ReceiptPath "project-release-automator" $false
+  }
+  if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+  try { return Get-Content -Raw -Encoding UTF8 -LiteralPath $path | ConvertFrom-Json }
+  catch { return $null }
+}
+
+function Get-ReceiptArtifactPaths {
+  $receipt = Read-LocalBuildReceipt
+  if (-not $receipt) { return @() }
+  return @($receipt.artifacts | ForEach-Object { [string]$_.path } | Where-Object { $_ })
+}
+
+function Get-ArtifactManifestPath {
+  $directory = Split-Path -Parent (Get-ReceiptPath)
+  return Join-Path $directory "artifacts.json"
+}
+
 function Expand-ArtifactToken([string]$Value, $Config, [string]$CurrentVersion) {
   $prefix = [string](Get-OptionalProperty $Config "tagPrefix" "v")
   return $Value.Replace("{projectName}", [string]$Config.projectName).
@@ -348,7 +396,20 @@ function Expand-ArtifactToken([string]$Value, $Config, [string]$CurrentVersion) 
     Replace("{tag}", "$prefix$CurrentVersion")
 }
 
-function Get-LocalArtifactRecords($Config) {
+function Get-LocalArtifactRecords($Config, [string]$ManifestPath = "") {
+  if ($ManifestPath -and (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
+    try { $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $ManifestPath | ConvertFrom-Json }
+    catch { throw "Local artifact manifest is invalid: $ManifestPath" }
+    $manifestRecords = @($manifest.artifacts)
+    foreach ($record in $manifestRecords) {
+      $path = Resolve-RepositoryPath ([string]$record.path)
+      if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "Manifest artifact not found: $($record.path)"
+      }
+      $record.sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash
+    }
+    return @($manifestRecords | Select-Object path, sha256 | Sort-Object path -Unique)
+  }
   $records = @()
   $currentVersion = Get-CurrentVersion $Config
   $outputRelative = [string](Get-OptionalProperty $Config.prepare "localOutputDirectory" "output")
@@ -401,8 +462,37 @@ function Get-LocalArtifactRecords($Config) {
   return @($records | Sort-Object path -Unique)
 }
 
-function Write-LocalBuildReceipt($Config) {
-  $artifacts = @(Get-LocalArtifactRecords $Config)
+function Remove-StaleManagedArtifacts($Config, [string[]]$PreviousPaths, $CurrentArtifacts) {
+  $outputRelative = [string](Get-OptionalProperty $Config.prepare "localOutputDirectory" "output")
+  if ([string]::IsNullOrWhiteSpace($outputRelative)) { $outputRelative = "output" }
+  $outputRoot = Resolve-RepositoryPath $outputRelative
+  $outputPrefix = $outputRoot + [IO.Path]::DirectorySeparatorChar
+  $current = @{}
+  foreach ($artifact in @($CurrentArtifacts)) {
+    $current[([string]$artifact.path).Replace("\", "/").ToLowerInvariant()] = $true
+  }
+  foreach ($relativePath in @($PreviousPaths | Where-Object { $_ })) {
+    $key = $relativePath.Replace("\", "/").ToLowerInvariant()
+    if ($current.ContainsKey($key)) { continue }
+    $path = Resolve-RepositoryPath $relativePath
+    if (-not $path.StartsWith($outputPrefix, [StringComparison]::OrdinalIgnoreCase)) { continue }
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
+      Remove-Item -LiteralPath $path -Force
+      Write-Host "Removed stale managed local artifact: $relativePath"
+    }
+  }
+}
+
+function Write-LocalBuildReceipt(
+  $Config,
+  [string]$ManifestPath = "",
+  [string[]]$PreviousPaths = @(),
+  [bool]$PruneStaleArtifacts = $false
+) {
+  $artifacts = @(Get-LocalArtifactRecords $Config $ManifestPath)
+  if ($PruneStaleArtifacts) {
+    Remove-StaleManagedArtifacts $Config $PreviousPaths $artifacts
+  }
   $receipt = [pscustomobject][ordered]@{
     schemaVersion = 1
     projectType = [string]$Config.projectType
@@ -417,13 +507,8 @@ function Write-LocalBuildReceipt($Config) {
 }
 
 function Test-LocalBuildFresh($Config) {
-  $path = Get-ReceiptPath "auto-release" $false
-  if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-    $path = Get-ReceiptPath "project-release-automator" $false
-  }
-  if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
-  try { $receipt = Get-Content -Raw -Encoding UTF8 -LiteralPath $path | ConvertFrom-Json }
-  catch { return $false }
+  $receipt = Read-LocalBuildReceipt
+  if (-not $receipt) { return $false }
   if ([string]$receipt.projectType -ne [string]$Config.projectType) { return $false }
   if ([string]$receipt.sourceFingerprint -ne (Get-SourceFingerprint $Config)) { return $false }
   $artifacts = @($receipt.artifacts)
@@ -436,18 +521,57 @@ function Test-LocalBuildFresh($Config) {
   return $true
 }
 
+function Invoke-StableReleaseBuild($Config, [string]$ManifestPath) {
+  for ($attempt = 1; $attempt -le 2; $attempt++) {
+    $before = Get-SourceFingerprint $Config
+    if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
+      Remove-Item -LiteralPath $ManifestPath -Force
+    }
+    & $releaseScript -Mode Prepare -Version $Version -Summary $Summary `
+      -RepositoryRoot $script:ResolvedRepositoryRoot -ConfigPath $ConfigPath `
+      -ArtifactManifestPath $ManifestPath | Out-Host
+    $Config = Read-ReleaseConfig
+    $after = Get-SourceFingerprint $Config
+    if ($before -eq $after) {
+      Write-LocalBuildReceipt $Config $ManifestPath
+      return [pscustomobject]@{ Config = $Config; Fingerprint = $after }
+    }
+    if ($attempt -lt 2) {
+      Write-Warning "Source files changed during the verified build; rebuilding once with the new state"
+    }
+  }
+  throw "Source files kept changing during the verified build; release stopped"
+}
+
 Assert-RepositoryContext
 
 if ($Operation -eq "CommitPush") {
-  Commit-AllChanges $true | Out-Null
+  Commit-AllChanges $true "" $false | Out-Null
   exit
 }
 
 $config = Ensure-ReleaseAutomation $Operation
 
 if ($Operation -eq "LocalBuild") {
-  & $releaseScript -Mode LocalBuild -RepositoryRoot $script:ResolvedRepositoryRoot -ConfigPath $ConfigPath
-  Write-LocalBuildReceipt $config
+  if (-not $ForceRebuild -and (Test-LocalBuildFresh $config)) {
+    Write-Host "Local build is current; reusing verified output. Use -ForceRebuild to rebuild."
+    exit
+  }
+  $previousPaths = @(Get-ReceiptArtifactPaths)
+  $manifestPath = Get-ArtifactManifestPath
+  try {
+    if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+      Remove-Item -LiteralPath $manifestPath -Force
+    }
+    & $releaseScript -Mode LocalBuild -RepositoryRoot $script:ResolvedRepositoryRoot -ConfigPath $ConfigPath `
+      -ArtifactManifestPath $manifestPath -ManagedLocalArtifactPath $previousPaths | Out-Host
+    Write-LocalBuildReceipt $config $manifestPath $previousPaths $true
+  }
+  finally {
+    if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+      Remove-Item -LiteralPath $manifestPath -Force
+    }
+  }
   exit
 }
 
@@ -460,13 +584,38 @@ $releaseMode = [string](Get-OptionalProperty $config.publish.release "mode" "non
 if ($releaseMode -eq "none") { throw "Release operation requires GitHub Release creation" }
 if (-not (Get-OptionalProperty $config.publish "workflow")) { throw "Release operation requires a tag-triggered build workflow" }
 
-$localBuildIsFresh = Test-LocalBuildFresh $config
-& $releaseScript -Mode Plan -Version $Version -Summary $Summary -RepositoryRoot $script:ResolvedRepositoryRoot -ConfigPath $ConfigPath
-& $releaseScript -Mode Prepare -Version $Version -Summary $Summary -RepositoryRoot $script:ResolvedRepositoryRoot -ConfigPath $ConfigPath -SkipBuild:$localBuildIsFresh
-if (-not $localBuildIsFresh) {
-  $config = Read-ReleaseConfig
-  Write-LocalBuildReceipt $config
+$localBuildIsFresh = -not $ForceRebuild -and (Test-LocalBuildFresh $config)
+& $releaseScript -Mode Plan -Version $Version -Summary $Summary -RepositoryRoot $script:ResolvedRepositoryRoot -ConfigPath $ConfigPath | Out-Host
+$manifestPath = Get-ArtifactManifestPath
+try {
+  $verifiedFingerprint = ""
+  if ($localBuildIsFresh) {
+    $before = Get-SourceFingerprint $config
+    & $releaseScript -Mode Prepare -Version $Version -Summary $Summary `
+      -RepositoryRoot $script:ResolvedRepositoryRoot -ConfigPath $ConfigPath -SkipBuild | Out-Host
+    $config = Read-ReleaseConfig
+    $after = Get-SourceFingerprint $config
+    if ($before -eq $after -and (Test-LocalBuildFresh $config)) {
+      $verifiedFingerprint = $after
+    }
+    else {
+      Write-Warning "The verified local build became stale during release preparation; rebuilding"
+      $result = Invoke-StableReleaseBuild $config $manifestPath
+      $config = $result.Config
+      $verifiedFingerprint = $result.Fingerprint
+    }
+  }
+  else {
+    $result = Invoke-StableReleaseBuild $config $manifestPath
+    $config = $result.Config
+    $verifiedFingerprint = $result.Fingerprint
+  }
+  $commit = Commit-AllChanges $false $verifiedFingerprint $true
+  & $releaseScript -Mode Publish -Version $Version -Summary $Summary -ReleaseNotes $ReleaseNotes `
+    -RepositoryRoot $script:ResolvedRepositoryRoot -ConfigPath $ConfigPath -AllowExistingHead:(-not $commit.Committed)
 }
-$commit = Commit-AllChanges $false
-& $releaseScript -Mode Publish -Version $Version -Summary $Summary -ReleaseNotes $ReleaseNotes `
-  -RepositoryRoot $script:ResolvedRepositoryRoot -ConfigPath $ConfigPath -AllowExistingHead:(-not $commit.Committed)
+finally {
+  if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+    Remove-Item -LiteralPath $manifestPath -Force
+  }
+}

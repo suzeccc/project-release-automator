@@ -9,11 +9,13 @@
 ```powershell
 $setup = "$env:USERPROFILE\.codex\skills\auto-release\scripts\setup-project.ps1"
 & $setup -Mode Detect -RepositoryRoot "<仓库根目录>"
+& $setup -Mode GenerateLocal -RepositoryRoot "<仓库根目录>"
 & $setup -Mode Generate -RepositoryRoot "<仓库根目录>"
 & $setup -Mode Validate -RepositoryRoot "<仓库根目录>"
 ```
 
 - `Detect`：只读识别支持的项目类型，并报告版本源、包管理器和构建入口。
+- `GenerateLocal`：只生成本地构建配置，不检查、不创建也不覆盖 GitHub 工作流；正式发布时可升级为完整配置。
 - `Generate`：生成 schema v2 配置和标签触发的 GitHub Actions 工作流。
 - `Validate`：检查配置、版本源、工作流标记、标签触发器、权限、草稿 Release 和产物规则。
 
@@ -33,6 +35,9 @@ $setup = "$env:USERPROFILE\.codex\skills\auto-release\scripts\setup-project.ps1"
 # 本地测试构建，不修改版本
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\invoke-release.ps1 -Operation LocalBuild
 
+# 强制重新构建本地程序
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\invoke-release.ps1 -Operation LocalBuild -ForceRebuild
+
 # 提交更改区和暂存区的全部安全更改，并推送当前分支
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\invoke-release.ps1 -Operation CommitPush -Summary "一句中文总结"
 
@@ -41,7 +46,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\invoke-release
   -Summary "一句中文总结" -ReleaseNotes "<中文 Release Notes>"
 ```
 
-`LocalBuild` 调用 `prepare.commands`，但不运行 `version.updates`，也不验证 GitHub 工作流的标签触发器、发布权限或草稿 Release。构建产物统一复制到 `prepare.localOutputDirectory`，默认是 `output`；目标文件使用 `<projectName><扩展名>`，不含版本号，目录或文件不存在时自动创建。若源 EXE 或目标 EXE 正由本仓库程序运行，执行器按完整路径强制终止对应进程并等待退出，然后覆盖规范文件名，不创建数字后缀备用文件。`prepare.artifacts[].localName` 可覆盖单个本地产物文件名，正式发布使用的 `destination` 不受影响。成功后在 `.git/auto-release/local-build.json` 保存忽略发布版本值的源文件指纹、统一产物路径和 SHA256，并兼容读取旧目录中的收据。正式发布仅在收据、指纹和所有产物哈希均有效时跳过本地构建。
+`LocalBuild` 调用 `prepare.localCommands`，未声明时兼容回退到 `prepare.commands`；它不运行 `version.updates`，也不验证 GitHub 工作流的标签触发器、发布权限或草稿 Release。`prepare.bootstrapCommands` 根据 `prepare.bootstrapInputs` 的哈希缓存，输入未变化时不重复安装依赖。构建产物统一复制到 `prepare.localOutputDirectory`，默认是 `output`；目标文件使用 `<projectName><扩展名>`，不含版本号，目录或文件不存在时自动创建。
+
+执行器只按完整路径终止配置产物和上次收据记录的 EXE，不扫描或终止输出目录中的无关程序。`prepare.artifacts[].localName` 可覆盖单个本地产物文件名，正式发布使用的 `destination` 不受影响。成功后在 `.git/auto-release/local-build.json` 保存忽略发布版本值的源文件指纹、底层执行器返回的精确产物清单和 SHA256，并删除上次由 Skill 管理、这次不再生成的旧输出。默认复用有效收据；`-ForceRebuild` 强制重新构建。正式发布提交前再次校验源码指纹，避免构建后变化的文件进入发布提交。
 
 `CommitPush` 和 `Release` 明确执行全量暂存，包含已暂存、未暂存、删除和未跟踪文件，并遵守 `.gitignore`。提交前拒绝 Git 冲突、明显凭据文件、私钥和常见 Token；失败时恢复原暂存区。
 
@@ -88,6 +95,16 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\invoke-release
   "prepare": {
     "parallel": false,
     "localOutputDirectory": "output",
+    "bootstrapInputs": ["package.json", "package-lock.json"],
+    "bootstrapRequiredPaths": ["node_modules"],
+    "bootstrapCommands": [
+      { "name": "Install dependencies", "command": "npm ci" }
+    ],
+    "localCommands": [
+      { "name": "Tests", "command": "npm test" },
+      { "name": "Build", "command": "npm run build" },
+      { "name": "Pack", "command": "if not exist dist mkdir dist && npm pack --pack-destination dist" }
+    ],
     "commands": [
       { "name": "Tests", "command": "npm test" },
       { "name": "Build", "command": "npm run build" },
@@ -138,7 +155,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\invoke-release
 - `tagPrefix`：可选，默认 `v`。
 - `version.read.pattern`：必须包含命名捕获组 `(?<version>...)`。
 - `version.updates`：每项在升级版本时执行；`expectedMatches` 必须与实际匹配数完全一致。
-- `prepare.commands`：Windows `cmd.exe` 命令；`parallel: true` 时并行执行并在首个失败后终止兄弟进程。
+- `prepare.parallel`：为 `true` 时并行执行所选构建命令，并在首个失败后终止兄弟进程。
+- `prepare.bootstrapInputs`：依赖安装缓存输入，通常是项目清单和锁文件。
+- `prepare.bootstrapRequiredPaths`：缓存有效时必须仍存在的依赖目录或状态文件；缺失时重新执行依赖准备。
+- `prepare.bootstrapCommands`：仅在缓存输入或命令变化时执行的依赖准备步骤；状态保存在 `.git/auto-release/bootstrap.json`。
+- `prepare.localCommands`：`LocalBuild` 使用的快速命令；缺失时回退到 `prepare.commands`。
+- `prepare.commands`：正式 `Prepare` 使用的完整测试和打包命令；Windows 下通过 `cmd.exe` 执行。
 - `prepare.localOutputDirectory`：可选，默认 `output`；`LocalBuild` 在此目录生成不含版本号的本地测试包。
 - `prepare.artifacts`：可为空；`destination` 只控制正式发布整理路径，`localName` 可选且只控制统一的本地产物文件名。
 - `publish.workflow`：可省略；存在时按标签和 `HEAD` SHA 等待对应 GitHub Actions 工作流。
@@ -158,6 +180,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\invoke-release
 - 从 `src-tauri/tauri.conf.json` 读取版本。
 - 更新存在的 Tauri、`package.json`、`package-lock.json`、`Cargo.toml` 和可识别的 `Cargo.lock` 版本项。
 - 工作流构建 Windows x64/ARM64、macOS Intel/Apple Silicon 和 Linux 安装包。
+- 本地构建使用 `tauri build --no-bundle`，避免每次生成安装器；正式构建仍生成全部安装包。
 - 使用 `tauri-apps/tauri-action` 创建草稿 Release，并校验 Windows 安装器、两个 DMG 和 Linux 包。
 
 ### Node.js

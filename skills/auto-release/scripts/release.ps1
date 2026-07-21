@@ -17,7 +17,11 @@ param(
 
   [switch]$SkipBuild,
 
-  [switch]$AllowExistingHead
+  [switch]$AllowExistingHead,
+
+  [string]$ArtifactManifestPath,
+
+  [string[]]$ManagedLocalArtifactPath = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -48,6 +52,12 @@ if ($SkipBuild -and $Mode -ne "Prepare") {
 }
 if ($AllowExistingHead -and $Mode -ne "Publish") {
   throw "AllowExistingHead is only valid for Publish"
+}
+if ($ArtifactManifestPath -and $Mode -notin @("LocalBuild", "Prepare")) {
+  throw "ArtifactManifestPath is only valid for LocalBuild or Prepare"
+}
+if ($ManagedLocalArtifactPath.Count -gt 0 -and $Mode -ne "LocalBuild") {
+  throw "ManagedLocalArtifactPath is only valid for LocalBuild"
 }
 
 function Invoke-Checked([string]$FilePath, [string[]]$Arguments) {
@@ -179,9 +189,23 @@ function Assert-ReleaseConfig {
   }
 
   $prepare = Get-RequiredProperty $script:Config "prepare" "root"
-  foreach ($command in @(Get-OptionalProperty $prepare "commands" @())) {
-    Get-RequiredProperty $command "name" "prepare.commands[]" | Out-Null
-    Get-RequiredProperty $command "command" "prepare.commands[]" | Out-Null
+  foreach ($commandProperty in @("bootstrapCommands", "localCommands", "commands")) {
+    foreach ($command in @(Get-OptionalProperty $prepare $commandProperty @())) {
+      Get-RequiredProperty $command "name" "prepare.$commandProperty[]" | Out-Null
+      Get-RequiredProperty $command "command" "prepare.$commandProperty[]" | Out-Null
+    }
+  }
+  foreach ($inputPath in @(Get-OptionalProperty $prepare "bootstrapInputs" @())) {
+    if ([string]::IsNullOrWhiteSpace([string]$inputPath)) {
+      throw "prepare.bootstrapInputs[] must be a repository-relative path"
+    }
+    Resolve-RepositoryPath ([string]$inputPath) | Out-Null
+  }
+  foreach ($requiredPath in @(Get-OptionalProperty $prepare "bootstrapRequiredPaths" @())) {
+    if ([string]::IsNullOrWhiteSpace([string]$requiredPath)) {
+      throw "prepare.bootstrapRequiredPaths[] must be a repository-relative path"
+    }
+    Resolve-RepositoryPath ([string]$requiredPath) | Out-Null
   }
   foreach ($artifact in @(Get-OptionalProperty $prepare "artifacts" @())) {
     Get-RequiredProperty $artifact "source" "prepare.artifacts[]" | Out-Null
@@ -384,25 +408,136 @@ function Update-VersionFiles {
   }
 }
 
-function Invoke-ConfiguredCommands {
+function Get-GitDirectory {
+  $path = Invoke-Captured "git" @("rev-parse", "--git-dir")
+  if (-not [IO.Path]::IsPathRooted($path)) {
+    $path = Join-Path $script:ResolvedRepositoryRoot $path
+  }
+  return Get-NormalizedPath $path
+}
+
+function Get-BootstrapFingerprint {
   $prepare = $script:Config.prepare
-  $commands = @(
-    @(Get-OptionalProperty $prepare "commands" @()) | ForEach-Object {
+  $entries = @()
+  foreach ($command in @(Get-OptionalProperty $prepare "bootstrapCommands" @())) {
+    $commandText = [string]$command.command
+    $entries += "command:$([string]$command.name):$commandText"
+    $toolMatch = [regex]::Match($commandText, '^\s*(?:"(?<quoted>[^"]+)"|(?<bare>[^\s&]+))')
+    $toolName = if ($toolMatch.Groups["quoted"].Success) { $toolMatch.Groups["quoted"].Value } else { $toolMatch.Groups["bare"].Value }
+    $tool = if ($toolName) { Get-Command $toolName -ErrorAction SilentlyContinue } else { $null }
+    if ($tool) {
+      $toolPath = [string]$tool.Source
+      $toolVersion = if ($toolPath -and (Test-Path -LiteralPath $toolPath -PathType Leaf)) {
+        [string](Get-Item -LiteralPath $toolPath).VersionInfo.FileVersion
+      }
+      else { "" }
+      $entries += "tool:$toolName`:$toolPath`:$toolVersion"
+    }
+    else {
+      $entries += "tool:$toolName`:missing"
+    }
+  }
+  $versionPatterns = @{}
+  $readPath = ([string]$script:Config.version.read.path).Replace("\", "/")
+  $versionPatterns[$readPath] = @([string]$script:Config.version.read.pattern)
+  foreach ($update in @(Get-OptionalProperty $script:Config.version "updates" @())) {
+    $updatePath = ([string]$update.path).Replace("\", "/")
+    if (-not $versionPatterns.ContainsKey($updatePath)) { $versionPatterns[$updatePath] = @() }
+    $versionPatterns[$updatePath] += [string]$update.pattern
+  }
+  foreach ($relativePath in @(Get-OptionalProperty $prepare "bootstrapInputs" @()) | Sort-Object -Unique) {
+    $path = Resolve-RepositoryPath ([string]$relativePath)
+    $hash = if (Test-Path -LiteralPath $path -PathType Leaf) {
+      $normalizedRelative = ([string]$relativePath).Replace("\", "/")
+      if ($versionPatterns.ContainsKey($normalizedRelative)) {
+        $content = [IO.File]::ReadAllText($path)
+        foreach ($pattern in @($versionPatterns[$normalizedRelative])) {
+          $regex = [regex]::new($pattern)
+          $content = $regex.Replace($content, {
+            param($match)
+            return ([regex]::new('\d+\.\d+\.\d+')).Replace($match.Value, '<release-version>', 1)
+          })
+        }
+        $bytes = [Text.UTF8Encoding]::new($false).GetBytes($content)
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace("-", "") }
+        finally { $sha.Dispose() }
+      }
+      else {
+        (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash
+      }
+    }
+    else {
+      "missing"
+    }
+    $entries += "input:$(([string]$relativePath).Replace('\', '/')):$hash"
+  }
+  $payload = [Text.UTF8Encoding]::new($false).GetBytes(($entries -join "`n"))
+  $sha = [Security.Cryptography.SHA256]::Create()
+  try { return ([BitConverter]::ToString($sha.ComputeHash($payload))).Replace("-", "") }
+  finally { $sha.Dispose() }
+}
+
+function Invoke-CommandList($Commands, [bool]$Parallel) {
+  $expanded = @(
+    @($Commands) | ForEach-Object {
       [pscustomobject]@{
         name = Expand-ConfigTokens ([string]$_.name)
         command = Expand-ConfigTokens ([string]$_.command)
       }
     }
   )
-  if ($commands.Count -eq 0) {
-    return
-  }
-  if ([bool](Get-OptionalProperty $prepare "parallel" $false)) {
-    Invoke-ParallelShellChecked -WorkingDirectory $script:ResolvedRepositoryRoot -Commands $commands
+  if ($expanded.Count -eq 0) { return }
+  if ($Parallel) {
+    Invoke-ParallelShellChecked -WorkingDirectory $script:ResolvedRepositoryRoot -Commands $expanded
   }
   else {
-    Invoke-SequentialShellChecked -WorkingDirectory $script:ResolvedRepositoryRoot -Commands $commands
+    Invoke-SequentialShellChecked -WorkingDirectory $script:ResolvedRepositoryRoot -Commands $expanded
   }
+}
+
+function Invoke-BootstrapCommands {
+  $prepare = $script:Config.prepare
+  $commands = @(Get-OptionalProperty $prepare "bootstrapCommands" @())
+  if ($commands.Count -eq 0) { return }
+
+  $fingerprint = Get-BootstrapFingerprint
+  $stateDirectory = Join-Path (Get-GitDirectory) "auto-release"
+  $statePath = Join-Path $stateDirectory "bootstrap.json"
+  if (Test-Path -LiteralPath $statePath -PathType Leaf) {
+    try { $state = Get-Content -Raw -Encoding UTF8 -LiteralPath $statePath | ConvertFrom-Json }
+    catch { $state = $null }
+    $requiredPathsExist = @(
+      @(Get-OptionalProperty $prepare "bootstrapRequiredPaths" @()) | Where-Object {
+        -not (Test-Path -LiteralPath (Resolve-RepositoryPath ([string]$_)))
+      }
+    ).Count -eq 0
+    if ($state -and [string]$state.fingerprint -eq $fingerprint -and $requiredPathsExist) {
+      Write-Host "Dependency bootstrap is current; skipping installation"
+      return
+    }
+  }
+
+  Invoke-CommandList $commands $false
+  New-Item -ItemType Directory -Force -Path $stateDirectory | Out-Null
+  $state = [pscustomobject][ordered]@{
+    schemaVersion = 1
+    fingerprint = $fingerprint
+    completedAtUtc = [DateTime]::UtcNow.ToString("o")
+  }
+  Write-Utf8NoBom $statePath (($state | ConvertTo-Json -Depth 5) + "`n")
+}
+
+function Invoke-ConfiguredCommands([bool]$LocalBuild = $false) {
+  $prepare = $script:Config.prepare
+  Invoke-BootstrapCommands
+  $commands = if ($LocalBuild -and $null -ne $prepare.PSObject.Properties["localCommands"]) {
+    @(Get-OptionalProperty $prepare "localCommands" @())
+  }
+  else {
+    @(Get-OptionalProperty $prepare "commands" @())
+  }
+  Invoke-CommandList $commands ([bool](Get-OptionalProperty $prepare "parallel" $false))
 }
 
 function ConvertTo-LocalOutputStem {
@@ -595,21 +730,26 @@ function Stop-ProcessesUsingLocalArtifacts([string[]]$Paths) {
 function Get-LocalBuildExecutablePaths {
   $paths = @()
   $prepare = $script:Config.prepare
-  $outputRelative = [string](Get-OptionalProperty $prepare "localOutputDirectory" "output")
-  if ([string]::IsNullOrWhiteSpace($outputRelative)) { $outputRelative = "output" }
-  $outputDirectory = Resolve-RepositoryPath $outputRelative
-  if (Test-Path -LiteralPath $outputDirectory -PathType Container) {
-    $paths += @(Get-ChildItem -LiteralPath $outputDirectory -File -Filter "*.exe" | ForEach-Object { $_.FullName })
-  }
-
-  foreach ($artifact in @(Get-OptionalProperty $prepare "artifacts" @())) {
+  $artifactDefinitions = @(Get-OptionalProperty $prepare "artifacts" @())
+  $usedLocalNames = @{}
+  foreach ($artifact in $artifactDefinitions) {
     $sourceRelative = Expand-ConfigTokens ([string]$artifact.source)
     $source = Resolve-RepositoryPath $sourceRelative
-    if ([IO.Path]::GetExtension($source) -eq ".exe" -and (Test-Path -LiteralPath $source -PathType Leaf)) {
-      $paths += $source
+    $destination = Get-LocalArtifactDestination ([IO.FileInfo]::new($source)) $artifact $usedLocalNames
+    if ([IO.Path]::GetExtension($source) -eq ".exe") { $paths += $source }
+    if ([IO.Path]::GetExtension($destination) -eq ".exe") { $paths += $destination }
+  }
+  if ($artifactDefinitions.Count -eq 0) {
+    foreach ($file in @(Get-DiscoveredLocalArtifactFiles)) {
+      $destination = Get-LocalArtifactDestination $file ([pscustomobject]@{}) $usedLocalNames
+      if ($file.Extension -eq ".exe") { $paths += $file.FullName }
+      if ([IO.Path]::GetExtension($destination) -eq ".exe") { $paths += $destination }
     }
   }
-  $paths += @(Get-DiscoveredLocalArtifactFiles | Where-Object { $_.Extension -eq ".exe" } | ForEach-Object { $_.FullName })
+  foreach ($relativePath in @($ManagedLocalArtifactPath)) {
+    $path = Resolve-RepositoryPath $relativePath
+    if ([IO.Path]::GetExtension($path) -eq ".exe") { $paths += $path }
+  }
   return @($paths | Sort-Object -Unique)
 }
 
@@ -715,6 +855,37 @@ function Get-PreparedArtifacts([bool]$LocalBuild = $false) {
     }
   }
   return $results
+}
+
+function Write-ArtifactManifest($Artifacts) {
+  if (-not $ArtifactManifestPath) { return }
+  $path = if ([IO.Path]::IsPathRooted($ArtifactManifestPath)) {
+    Get-NormalizedPath $ArtifactManifestPath
+  }
+  else {
+    Get-NormalizedPath (Join-Path $script:ResolvedRepositoryRoot $ArtifactManifestPath)
+  }
+  $gitDirectory = Get-GitDirectory
+  $gitPrefix = $gitDirectory + [IO.Path]::DirectorySeparatorChar
+  if (-not $path.StartsWith($gitPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+    throw "Artifact manifest must be stored inside the Git directory"
+  }
+  $directory = Split-Path -Parent $path
+  New-Item -ItemType Directory -Force -Path $directory | Out-Null
+  $records = @(
+    @($Artifacts) | ForEach-Object {
+      [pscustomobject][ordered]@{
+        path = ConvertTo-RepositoryRelativePath ([string]$_.Path)
+        sha256 = if ($_.SHA256) { [string]$_.SHA256 } else { (Get-FileHash -Algorithm SHA256 -LiteralPath $_.Path).Hash }
+        length = [long]$_.Length
+      }
+    }
+  )
+  $manifest = [pscustomobject][ordered]@{
+    schemaVersion = 1
+    artifacts = $records
+  }
+  Write-Utf8NoBom $path (($manifest | ConvertTo-Json -Depth 10) + "`n")
 }
 
 function Find-WorkflowRun($Workflow, [string]$HeadSha) {
@@ -926,6 +1097,7 @@ function Invoke-Prepare {
     else {
       Invoke-ConfiguredCommands
       $artifacts = @(Get-PreparedArtifacts)
+      Write-ArtifactManifest $artifacts
     }
     Write-Host "Prepared $($script:Config.projectName) $($script:Tag)"
     if ($artifacts.Count -gt 0) {
@@ -943,8 +1115,9 @@ function Invoke-LocalBuild {
   $currentVersion = Get-CurrentVersion
   Write-Host "Local build: $($script:Config.projectName) $currentVersion"
   Stop-LocalBuildProcesses
-  Invoke-ConfiguredCommands
+  Invoke-ConfiguredCommands $true
   $artifacts = @(Get-PreparedArtifacts $true)
+  Write-ArtifactManifest $artifacts
   Write-Host "Local build completed without changing the project version"
   if ($artifacts.Count -gt 0) {
     $artifacts | Format-List

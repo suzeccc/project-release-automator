@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory)]
-  [ValidateSet("Detect", "Generate", "Validate")]
+  [ValidateSet("Detect", "GenerateLocal", "Generate", "Validate")]
   [string]$Mode,
 
   [ValidateSet("auto", "tauri", "node", "go", "python", "rust", "dotnet", "java", "cmake", "flutter", "android", "electron", "docker")]
@@ -116,6 +116,12 @@ function Get-PackageCommand([string]$Manager, [string]$ScriptName) {
   if ($Manager -eq "pnpm") { return "pnpm run $ScriptName" }
   if ($Manager -eq "yarn") { return "yarn $ScriptName" }
   return "bun run $ScriptName"
+}
+
+function Get-TauriLocalBuildCommand([string]$Manager) {
+  $command = Get-PackageCommand $Manager "tauri build"
+  if ($Manager -in @("npm", "pnpm")) { return "$command -- --no-bundle" }
+  return "$command --no-bundle"
 }
 
 function Test-PackageScript($Package, [string]$Name) {
@@ -676,6 +682,10 @@ function New-GenerationBundle(
   $defaults = Get-RepositoryDefaults
   $stem = ConvertTo-ArtifactStem $Profile.ProjectName
   $updates = @()
+  $bootstrapCommands = @()
+  $bootstrapInputs = @()
+  $bootstrapRequiredPaths = @()
+  $localCommands = $null
   $commands = @()
   $artifacts = @()
   $additionalFiles = @()
@@ -687,7 +697,11 @@ function New-GenerationBundle(
     $updates += New-VersionUpdate "package.json" '("version"\s*:\s*")\d+\.\d+\.\d+(")' '${1}{version}$2'
     Add-ExistingVersionUpdate ([ref]$updates) "package-lock.json" '(?ms)\A(\s*\{.{0,1000}?"version"\s*:\s*")\d+\.\d+\.\d+(")' '${1}{version}$2'
     Add-ExistingVersionUpdate ([ref]$updates) "package-lock.json" '(?ms)(""\s*:\s*\{[^{}]*?"version"\s*:\s*")\d+\.\d+\.\d+(")' '${1}{version}$2'
-    $commands += [pscustomobject][ordered]@{ name = "Install dependencies"; command = $Profile.Manager.Install }
+    $bootstrapCommands += [pscustomobject][ordered]@{ name = "Install dependencies"; command = $Profile.Manager.Install }
+    $bootstrapInputs += @("package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb") | Where-Object {
+      Test-Path -LiteralPath (Join-Path $script:ResolvedRepositoryRoot $_)
+    }
+    $bootstrapRequiredPaths += "node_modules"
     if (Test-PackageScript $Profile.Package "test") {
       $commands += [pscustomobject][ordered]@{ name = "Tests"; command = Get-PackageCommand $Profile.Manager.Name "test" }
     }
@@ -702,7 +716,11 @@ function New-GenerationBundle(
     $updates += New-VersionUpdate "package.json" '("version"\s*:\s*")\d+\.\d+\.\d+(")' '${1}{version}$2'
     Add-ExistingVersionUpdate ([ref]$updates) "package-lock.json" '(?ms)\A(\s*\{.{0,1000}?"version"\s*:\s*")\d+\.\d+\.\d+(")' '${1}{version}$2'
     Add-ExistingVersionUpdate ([ref]$updates) "package-lock.json" '(?ms)(""\s*:\s*\{[^{}]*?"version"\s*:\s*")\d+\.\d+\.\d+(")' '${1}{version}$2'
-    $commands += [pscustomobject][ordered]@{ name = "Install dependencies"; command = $Profile.Manager.Install }
+    $bootstrapCommands += [pscustomobject][ordered]@{ name = "Install dependencies"; command = $Profile.Manager.Install }
+    $bootstrapInputs += @("package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb") | Where-Object {
+      Test-Path -LiteralPath (Join-Path $script:ResolvedRepositoryRoot $_)
+    }
+    $bootstrapRequiredPaths += "node_modules"
     if (Test-PackageScript $Profile.Package "test") {
       $commands += [pscustomobject][ordered]@{ name = "Tests"; command = Get-PackageCommand $Profile.Manager.Name "test" }
     }
@@ -724,14 +742,24 @@ function New-GenerationBundle(
       Add-ExistingVersionUpdate ([ref]$updates) "src-tauri/Cargo.lock" $lockPattern '${1}{version}$2'
     }
     if ($Profile.Package) {
-      $commands += [pscustomobject][ordered]@{ name = "Install dependencies"; command = $Profile.Manager.Install }
+      $bootstrapCommands += [pscustomobject][ordered]@{ name = "Install dependencies"; command = $Profile.Manager.Install }
+      $bootstrapInputs += @("package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb", "src-tauri/Cargo.toml", "src-tauri/Cargo.lock") | Where-Object {
+        Test-Path -LiteralPath (Join-Path $script:ResolvedRepositoryRoot $_)
+      }
+      $bootstrapRequiredPaths += "node_modules"
       if (Test-PackageScript $Profile.Package "test") {
         $commands += [pscustomobject][ordered]@{ name = "Tests"; command = Get-PackageCommand $Profile.Manager.Name "test" }
       }
       $commands += [pscustomobject][ordered]@{ name = "Build installers"; command = Get-PackageCommand $Profile.Manager.Name "tauri build" }
+      $localCommands = @($commands | Where-Object { $_.name -ne "Build installers" })
+      $localCommands += [pscustomobject][ordered]@{ name = "Build local program"; command = Get-TauriLocalBuildCommand $Profile.Manager.Name }
     }
     else {
       $commands += [pscustomobject][ordered]@{ name = "Build installers"; command = "cargo tauri build" }
+      $localCommands = @([pscustomobject][ordered]@{ name = "Build local program"; command = "cargo tauri build --no-bundle" })
+      $bootstrapInputs += @("src-tauri/Cargo.toml", "src-tauri/Cargo.lock") | Where-Object {
+        Test-Path -LiteralPath (Join-Path $script:ResolvedRepositoryRoot $_)
+      }
     }
   }
   elseif ($Profile.ProjectType -eq "go") {
@@ -747,7 +775,11 @@ function New-GenerationBundle(
   elseif ($Profile.ProjectType -eq "flutter") {
     $readPattern = $Profile.VersionReadPattern
     $updates += New-VersionUpdate $Profile.VersionSource $Profile.VersionUpdatePattern '${1}{version}'
-    $commands += [pscustomobject][ordered]@{ name = "Install dependencies"; command = "flutter pub get" }
+    $bootstrapCommands += [pscustomobject][ordered]@{ name = "Install dependencies"; command = "flutter pub get" }
+    $bootstrapInputs += @("pubspec.yaml", "pubspec.lock") | Where-Object {
+      Test-Path -LiteralPath (Join-Path $script:ResolvedRepositoryRoot $_)
+    }
+    $bootstrapRequiredPaths += ".dart_tool/package_config.json"
     if ($Profile.HasTests) { $commands += [pscustomobject][ordered]@{ name = "Tests"; command = "flutter test" } }
     $commands += [pscustomobject][ordered]@{ name = "Build Windows"; command = "flutter build windows --release" }
   }
@@ -784,19 +816,24 @@ function New-GenerationBundle(
     $readPattern = $Profile.VersionReadPattern
     $updates += New-VersionUpdate $Profile.VersionSource $Profile.VersionUpdatePattern '${1}{version}$2'
     if ($Profile.PackageManager -eq "uv") {
-      $commands += [pscustomobject][ordered]@{ name = "Install dependencies"; command = "python -m pip install uv && uv sync --all-extras" }
+      $bootstrapCommands += [pscustomobject][ordered]@{ name = "Install dependencies"; command = "python -m pip install uv && uv sync --all-extras" }
       if ($Profile.HasTests) { $commands += [pscustomobject][ordered]@{ name = "Tests"; command = "uv run pytest" } }
       $commands += [pscustomobject][ordered]@{ name = "Build distributions"; command = "uv build" }
     }
     elseif ($Profile.PackageManager -eq "poetry") {
-      $commands += [pscustomobject][ordered]@{ name = "Install dependencies"; command = "python -m pip install poetry && poetry install" }
+      $bootstrapCommands += [pscustomobject][ordered]@{ name = "Install dependencies"; command = "python -m pip install poetry && poetry install" }
       if ($Profile.HasTests) { $commands += [pscustomobject][ordered]@{ name = "Tests"; command = "poetry run pytest" } }
       $commands += [pscustomobject][ordered]@{ name = "Build distributions"; command = "poetry build" }
     }
     else {
-      $commands += [pscustomobject][ordered]@{ name = "Install dependencies"; command = "python -m pip install --upgrade build && python -m pip install -e ." }
-      if ($Profile.HasTests) { $commands += [pscustomobject][ordered]@{ name = "Tests"; command = "python -m pip install pytest && python -m pytest" } }
+      $installCommand = "python -m pip install --upgrade build && python -m pip install -e ."
+      if ($Profile.HasTests) { $installCommand += " && python -m pip install pytest" }
+      $bootstrapCommands += [pscustomobject][ordered]@{ name = "Install dependencies"; command = $installCommand }
+      if ($Profile.HasTests) { $commands += [pscustomobject][ordered]@{ name = "Tests"; command = "python -m pytest" } }
       $commands += [pscustomobject][ordered]@{ name = "Build distributions"; command = "python -m build" }
+    }
+    $bootstrapInputs += @("pyproject.toml", "uv.lock", "poetry.lock", "requirements.txt") | Where-Object {
+      Test-Path -LiteralPath (Join-Path $script:ResolvedRepositoryRoot $_)
     }
   }
   elseif ($Profile.ProjectType -eq "rust") {
@@ -822,7 +859,12 @@ function New-GenerationBundle(
       $updatePattern = "(?s)(<$element>\s*)\d+\.\d+\.\d+(\s*</$element>)"
       $updates += New-VersionUpdate $Profile.VersionSource $updatePattern '${1}{version}$2'
     }
-    $commands += [pscustomobject][ordered]@{ name = "Restore"; command = "dotnet restore `"$($Profile.BuildPath)`"" }
+    $bootstrapCommands += [pscustomobject][ordered]@{ name = "Restore"; command = "dotnet restore `"$($Profile.BuildPath)`"" }
+    $bootstrapInputs += @($Profile.BuildPath, "packages.lock.json") | Where-Object {
+      Test-Path -LiteralPath (Join-Path $script:ResolvedRepositoryRoot $_)
+    }
+    $projectDirectory = Split-Path -Parent $Profile.BuildPath
+    $bootstrapRequiredPaths += if ($projectDirectory) { "$projectDirectory/obj/project.assets.json" } else { "obj/project.assets.json" }
     $commands += [pscustomobject][ordered]@{ name = "Tests"; command = "dotnet test `"$($Profile.BuildPath)`" --no-restore --configuration Release" }
     $commands += [pscustomobject][ordered]@{ name = "Pack"; command = "dotnet pack `"$($Profile.BuildPath)`" --no-restore --configuration Release -p:PackageVersion={version} --output dist" }
     $artifacts += [pscustomobject][ordered]@{ source = "dist/$Stem.{version}.nupkg"; sha256 = $true }
@@ -835,6 +877,8 @@ function New-GenerationBundle(
   else {
     throw "No generation strategy for project type: $($Profile.ProjectType)"
   }
+
+  if ($null -eq $localCommands) { $localCommands = @($commands) }
 
   $templateName = "$($Profile.ProjectType)-v1"
   $requiredAssets = @(Get-RequiredAssets $Profile.ProjectType $stem)
@@ -858,6 +902,10 @@ function New-GenerationBundle(
     prepare = [pscustomobject][ordered]@{
       parallel = $false
       localOutputDirectory = "output"
+      bootstrapInputs = @($bootstrapInputs | Sort-Object -Unique)
+      bootstrapRequiredPaths = @($bootstrapRequiredPaths | Sort-Object -Unique)
+      bootstrapCommands = @($bootstrapCommands)
+      localCommands = @($localCommands)
       commands = @($commands)
       artifacts = @($artifacts)
     }
@@ -1072,7 +1120,10 @@ function Invoke-Generate($Profile) {
   }
   foreach ($additional in $bundle.AdditionalFiles) {
     $additionalPath = Resolve-RepositoryFile $additional.RelativePath
-    if (Test-Path -LiteralPath $additionalPath -PathType Leaf) {
+    if (
+      (Test-Path -LiteralPath $additionalPath -PathType Leaf) -and
+      [IO.File]::ReadAllText($additionalPath) -cne $additional.Content
+    ) {
       throw "Refusing to overwrite existing generated support file: $additionalPath"
     }
   }
@@ -1091,6 +1142,41 @@ function Invoke-Generate($Profile) {
     else {
       Write-AtomicUtf8 $file.Path $file.Content
       Write-Host "Generated: $($file.Path)"
+    }
+  }
+  Invoke-Validate
+}
+
+function Invoke-GenerateLocal($Profile) {
+  $configFile = Resolve-RepositoryFile $ConfigPath
+  $bundle = New-GenerationBundle $Profile $WorkflowPath $false
+  $bundle.Config.automation | Add-Member -NotePropertyName localOnly -NotePropertyValue $true -Force
+  $bundle.Config.publish.workflow = $null
+  $bundle.Config.publish.release.mode = "none"
+  $configContent = ($bundle.Config | ConvertTo-Json -Depth 20) + "`n"
+
+  Assert-ManagedConfigOrAbsent $configFile
+  foreach ($additional in $bundle.AdditionalFiles) {
+    $additionalPath = Resolve-RepositoryFile $additional.RelativePath
+    if (
+      (Test-Path -LiteralPath $additionalPath -PathType Leaf) -and
+      [IO.File]::ReadAllText($additionalPath) -cne $additional.Content
+    ) {
+      throw "Refusing to overwrite existing generated support file: $additionalPath"
+    }
+  }
+
+  $desired = @([pscustomobject]@{ Path = $configFile; Content = $configContent })
+  foreach ($additional in $bundle.AdditionalFiles) {
+    $desired += [pscustomobject]@{ Path = Resolve-RepositoryFile $additional.RelativePath; Content = $additional.Content }
+  }
+  foreach ($file in $desired) {
+    if ((Test-Path -LiteralPath $file.Path -PathType Leaf) -and [IO.File]::ReadAllText($file.Path) -ceq $file.Content) {
+      Write-Host "Unchanged: $($file.Path)"
+    }
+    else {
+      Write-AtomicUtf8 $file.Path $file.Content
+      Write-Host "Generated local build config: $($file.Path)"
     }
   }
   Invoke-Validate
@@ -1214,6 +1300,9 @@ else {
       packageManager = $profile.PackageManager
       buildPath = $profile.BuildPath
     } | ConvertTo-Json -Depth 4
+  }
+  elseif ($Mode -eq "GenerateLocal") {
+    Invoke-GenerateLocal $profile
   }
   else {
     Invoke-Generate $profile
