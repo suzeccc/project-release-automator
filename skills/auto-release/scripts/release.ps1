@@ -160,7 +160,7 @@ function Initialize-ReleaseContext {
   $script:Config = Get-Content -Raw -Encoding UTF8 $script:ConfigFile | ConvertFrom-Json
   Assert-ReleaseConfig
   if ($Mode -eq "LocalBuild" -and -not $normalizedVersion) {
-    $normalizedVersion = Get-CurrentVersion
+    $script:normalizedVersion = Get-CurrentVersion
   }
   $tagPrefix = [string](Get-OptionalProperty $script:Config "tagPrefix" "v")
   $script:Tag = "$tagPrefix$normalizedVersion"

@@ -1,6 +1,6 @@
 ---
 name: auto-release
-description: Detects and configures common application, library, native, mobile, desktop, and container repositories, then provides local test builds, style-aware commit-and-push, formal GitHub releases, dry-run previews, and JSON results. Supports Tauri, Node.js, Go, Python, Rust, .NET, Java, CMake, Flutter, Android, Electron, and Docker. Use when the user asks to build a local test program without changing its version, analyze recent Git commit style, commit and push all changes with a Chinese summary, preview release operations, create or validate release automation, generate a tag-triggered GitHub Actions workflow, or formally publish a semantic version such as v1.2.3.
+description: Detects and configures common application, library, native, mobile, desktop, and container repositories, then provides local test builds, style-aware single or grouped commit-and-push, formal GitHub releases, dry-run previews, and JSON results. Supports Tauri, Node.js, Go, Python, Rust, .NET, Java, CMake, Flutter, Android, Electron, and Docker. Use when the user asks to build a local test program without changing its version, analyze recent Git commit style, classify changes into coherent commits and push them together, preview release operations, create or validate release automation, generate a tag-triggered GitHub Actions workflow, or formally publish a semantic version such as v1.2.3.
 ---
 
 # Auto Release
@@ -69,6 +69,22 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $invoke -Operation Commi
 ```
 
 提交前分析最近 30 条非合并提交。至少 3 条样本且某种风格占比达到 60% 时沿用该风格；样本不足、并列或置信度不足时使用 Conventional Commits。支持识别 Conventional、纯文本、`[type]`、工单前缀和 Gitmoji；`commit.policy` 可固定为 `conventional` 或设为 `off`。根据完整差异生成单行中文 `Summary`，并用分析器校验后再提交。`-WhatIf -OutputFormat Json` 会在 `commitStyle` 返回选择结果、置信度和回退原因。
+
+改动包含两个以上相互独立的目的时，优先生成 `.git/auto-release/commit-plan.json` 并使用 `AutoSplit`。按实际 diff 语义分类，不只按目录分类；清单与锁文件、实现与对应测试、源文件与生成文件必须同组，同一文件默认只属于一组。限制为 2 至 4 个提交；微小组、低置信度组或有循环依赖的组合并，无法可靠分类时回退到上述单提交。计划格式见 [配置参考](references/config.md)。
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $invoke `
+  -Operation CommitPush -CommitStrategy AutoSplit `
+  -CommitPlanPath "<仓库根目录>/.git/auto-release/commit-plan.json" `
+  -RepositoryRoot "<仓库根目录>" -WhatIf
+
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $invoke `
+  -Operation CommitPush -CommitStrategy AutoSplit `
+  -CommitPlanPath "<仓库根目录>/.git/auto-release/commit-plan.json" `
+  -RepositoryRoot "<仓库根目录>"
+```
+
+先用 `-WhatIf` 核对计划，再运行与各组相关的测试和最终完整验证。执行器要求计划精确覆盖所有改动，在临时 `auto-release/transaction-*` 分支依次提交；任何组失败会回到原分支并恢复原暂存区和未提交改动。全部组成功后才快进原分支并执行一次 push。推送前远程发生变化时停止，已验证的本地提交保留以便安全重试。
 
 本操作明确允许等价于 `git add -A` 的全量暂存，但仍遵守 `.gitignore`；发现 `.env`、私钥、凭据文件或密钥内容时停止并恢复原暂存区。远程领先或分叉时停止，不自动合并或变基。
 即使 `.codex-release.json` 的发布分支与当前分支不同，也必须提交并推送当前分支；配置分支只约束正式 `Release`。

@@ -1,4 +1,4 @@
 interface:
   display_name: "Auto Release"
-  short_description: "本地快速打包、风格自适应提交和 GitHub 正式发布"
+  short_description: "本地打包、智能分类提交和 GitHub 正式发布"
   default_prompt: "Use $auto-release and let me choose LocalBuild, CommitPush, or Release for the current project."

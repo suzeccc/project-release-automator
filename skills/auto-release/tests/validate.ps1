@@ -1049,7 +1049,73 @@ jobs: {}
   $remoteHead = (git -C $operationsRoot ls-remote origin refs/heads/main).Split("`t")[0]
   Assert-Equal $remoteHead $localHead "CommitPush did not push the current branch"
 
-  $mainHead = $localHead
+  $multiBase = $localHead
+  Write-TestUtf8 (Join-Path $operationsRoot "docs\usage.md") "usage`n"
+  Write-TestUtf8 (Join-Path $operationsRoot "src\feature.txt") "feature`n"
+  $multiPlanPath = Join-Path $operationsRoot ".git\auto-release\commit-plan.json"
+  $multiPlan = [pscustomobject][ordered]@{
+    schemaVersion = 1
+    baseHead = $multiBase
+    groups = @(
+      [pscustomobject][ordered]@{
+        summary = "docs: $newLabel usage documentation"
+        paths = @("docs/usage.md")
+      },
+      [pscustomobject][ordered]@{
+        summary = "feat: $newLabel grouped feature"
+        paths = @("src/feature.txt")
+      }
+    )
+  }
+  Write-TestUtf8 $multiPlanPath (($multiPlan | ConvertTo-Json -Depth 10) + "`n")
+  $multiPreviewOutput = & $shell -NoProfile -ExecutionPolicy Bypass -File $invokeScript `
+    -Operation CommitPush -CommitStrategy AutoSplit -CommitPlanPath $multiPlanPath `
+    -RepositoryRoot $operationsRoot -WhatIf -OutputFormat Json
+  if ($LASTEXITCODE -ne 0) { throw "AutoSplit WhatIf process failed" }
+  $multiPreview = ($multiPreviewOutput | Select-Object -Last 1) | ConvertFrom-Json
+  Assert-Equal $multiPreview.commitStrategy "AutoSplit" "AutoSplit WhatIf reported the wrong strategy"
+  Assert-Equal @($multiPreview.commitPlan.groups).Count 2 "AutoSplit WhatIf did not return both commit groups"
+  Assert-Equal (git -C $operationsRoot rev-parse HEAD) $multiBase "AutoSplit WhatIf created a commit"
+
+  $multiOutput = & $shell -NoProfile -ExecutionPolicy Bypass -File $invokeScript `
+    -Operation CommitPush -CommitStrategy AutoSplit -CommitPlanPath $multiPlanPath `
+    -RepositoryRoot $operationsRoot -OutputFormat Json
+  if ($LASTEXITCODE -ne 0) { throw "AutoSplit CommitPush process failed" }
+  $multiResult = ($multiOutput | Select-Object -Last 1) | ConvertFrom-Json
+  Assert-Equal $multiResult.commitCount 2 "AutoSplit did not report both commits"
+  $multiSubjects = @(git -C $operationsRoot log -2 --pretty=%s)
+  Assert-Equal $multiSubjects[1] $multiPlan.groups[0].summary "AutoSplit created the first commit in the wrong order"
+  Assert-Equal $multiSubjects[0] $multiPlan.groups[1].summary "AutoSplit created the second commit in the wrong order"
+  Assert-Equal (git -C $operationsRoot status --porcelain) $null "AutoSplit left a dirty working tree"
+  Assert-Equal (git -C $operationsRoot branch --list "auto-release/transaction-*") $null "AutoSplit left a transaction branch"
+  $multiHead = git -C $operationsRoot rev-parse HEAD
+  $remoteMultiHead = (git -C $operationsRoot ls-remote origin refs/heads/main).Split("`t")[0]
+  Assert-Equal $remoteMultiHead $multiHead "AutoSplit did not push the complete commit chain"
+
+  Write-TestUtf8 (Join-Path $operationsRoot "safe.txt") "safe`n"
+  Write-TestUtf8 (Join-Path $operationsRoot "bad.txt") "bad   `n"
+  & git -C $operationsRoot add safe.txt
+  $rollbackPlan = [pscustomobject][ordered]@{
+    schemaVersion = 1
+    baseHead = $multiHead
+    groups = @(
+      [pscustomobject][ordered]@{ summary = "chore: $newLabel safe change"; paths = @("safe.txt") },
+      [pscustomobject][ordered]@{ summary = "test: $newLabel invalid whitespace"; paths = @("bad.txt") }
+    )
+  }
+  Write-TestUtf8 $multiPlanPath (($rollbackPlan | ConvertTo-Json -Depth 10) + "`n")
+  Assert-Throws {
+    & $invokeScript -Operation CommitPush -CommitStrategy AutoSplit -CommitPlanPath $multiPlanPath -RepositoryRoot $operationsRoot
+  } "trailing whitespace" "AutoSplit accepted a failing later commit group"
+  Assert-Equal (git -C $operationsRoot branch --show-current) "main" "AutoSplit rollback left the transaction branch checked out"
+  Assert-Equal (git -C $operationsRoot rev-parse HEAD) $multiHead "AutoSplit rollback changed the original branch"
+  Assert-Match (git -C $operationsRoot diff --cached --name-only) '^safe\.txt$' "AutoSplit rollback did not restore the original index"
+  Assert-Match (git -C $operationsRoot status --porcelain) '\?\? bad\.txt' "AutoSplit rollback lost an untracked file"
+  Assert-Equal (git -C $operationsRoot branch --list "auto-release/transaction-*") $null "AutoSplit rollback left a transaction branch"
+  & git -C $operationsRoot reset -- safe.txt | Out-Null
+  Remove-Item -LiteralPath (Join-Path $operationsRoot "safe.txt"), (Join-Path $operationsRoot "bad.txt") -Force
+
+  $mainHead = $multiHead
   & git -C $operationsRoot switch -c feature/commit-push | Out-Null
   Write-TestUtf8 (Join-Path $operationsRoot "feature.txt") "feature`n"
   $featureSummary = "chore: $newLabel feature branch"
@@ -1215,6 +1281,7 @@ Assert-Match $scriptSource 'Expand-ConfigTokens \(\[string\]\$_.command\)' "prep
 Assert-Match $scriptSource 'publish-draft.*create.*none' "missing release modes"
 Assert-Match $scriptSource 'schemaVersion -notin @\(1, 2\)' "release runner does not accept schema v1 and v2"
 Assert-Match $scriptSource 'LocalBuild' "release runner does not support local builds"
+Assert-Match $scriptSource '\$script:normalizedVersion = Get-CurrentVersion' "LocalBuild does not retain the detected project version for artifact validation"
 Assert-Match $scriptSource 'Stop-ProcessesUsingLocalArtifacts' "LocalBuild does not stop processes using local artifacts"
 Assert-Match $scriptSource 'SkipBuild' "release runner cannot reuse a current local build"
 Assert-Match $scriptSource 'AllowExistingHead' "release runner cannot publish without an unnecessary empty commit"
@@ -1258,6 +1325,9 @@ Assert-Match $invokeSource 'AllowExistingHead' "Release does not support unchang
 Assert-Match $invokeSource 'RequestedOperation -eq "LocalBuild"' "LocalBuild does not bypass GitHub workflow validation"
 Assert-Match $invokeSource 'Mode GenerateLocal' "First-time LocalBuild still creates a GitHub release workflow"
 Assert-Match $invokeSource 'Assert-CommitSummaryStyle' "CommitPush does not enforce the analyzed commit style"
+Assert-Match $invokeSource 'CommitStrategy.*AutoSplit' "CommitPush does not expose automatic multi-commit execution"
+Assert-Match $invokeSource 'auto-release/transaction-' "CommitPush does not use a transaction branch"
+Assert-Match $invokeSource 'Commit plan does not cover all changes' "CommitPush does not require exact plan coverage"
 Assert-Match $referenceSource 'Conventional Commits' "config reference does not document commit-style fallback"
 foreach ($template in $workflowTemplates) {
   $templateSource = Get-Content -Raw -Encoding UTF8 $template

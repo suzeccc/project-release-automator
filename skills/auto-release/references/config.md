@@ -47,6 +47,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\invoke-release
 # 提交更改区和暂存区的全部安全更改，并推送当前分支
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\invoke-release.ps1 -Operation CommitPush -Summary "一句中文总结"
 
+# 按计划创建多个提交，全部成功后统一推送
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\invoke-release.ps1 `
+  -Operation CommitPush -CommitStrategy AutoSplit `
+  -CommitPlanPath ".git/auto-release/commit-plan.json"
+
 # 更新版本、提交推送、构建全部包并发布 GitHub
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\invoke-release.ps1 -Operation Release -Version v1.2.3 `
   -Summary "一句中文总结" -ReleaseNotes "<中文 Release Notes>"
@@ -57,6 +62,27 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\invoke-release
 执行器只按完整路径终止配置产物和上次收据记录的 EXE，不扫描或终止输出目录中的无关程序。`prepare.localArtifacts` 控制本地快速构建产物，`prepare.artifacts` 控制正式构建产物；`prepare.localSearchRoots` 为无法提前确定完整文件名的本地产物提供受限搜索根目录。`localName` 可覆盖统一输出文件名。`prepare.localOutputDirectory` 必须是无版本、无标签占位符的稳定路径。草稿式 GitHub Release 的正式操作只把本地验证产物写入该规范目录，不采用 `artifacts[].destination` 中的版本路径；GitHub Actions 负责正式发布包。成功后在 `.git/auto-release/local-build.json` 保存忽略发布版本值的源文件指纹、底层执行器返回的精确产物清单和 SHA256，并删除上次由 Skill 管理、这次不再生成的旧输出。默认复用有效收据；`-ForceRebuild` 强制重新构建。正式发布提交前再次校验源码指纹，避免构建后变化的文件进入发布提交。
 
 `CommitPush` 和 `Release` 明确执行全量暂存，包含已暂存、未暂存、删除和未跟踪文件，并遵守 `.gitignore`。提交前拒绝 Git 冲突、明显凭据文件、私钥和常见 Token；失败时恢复原暂存区。
+
+`CommitPush` 默认使用兼容的 `Single` 策略。需要把一轮改动拆成多个语义提交时，Codex 先把计划写入 Git 元数据目录，再传入 `-CommitStrategy AutoSplit -CommitPlanPath <path>`。计划不会进入仓库，必须精确列出全部改动路径，不接受通配符，同一文件不能重复出现。默认最多 4 组，可用 `-MaxCommits` 在 2 至 8 之间调整。
+
+```json
+{
+  "schemaVersion": 1,
+  "baseHead": "完整的计划基准提交 SHA",
+  "groups": [
+    {
+      "summary": "chore(repo): 整理仓库维护文件",
+      "paths": [".gitignore", "previews/example.html"]
+    },
+    {
+      "summary": "perf(frontend): 优化按需加载与运行时开销",
+      "paths": ["package.json", "package-lock.json", "src/app.ts", "tests/app.test.ts"]
+    }
+  ]
+}
+```
+
+每个 `summary` 都必须符合检测到的仓库风格并包含中文。建议保持 2 至 4 组：实现和对应测试同组、清单和锁文件同组、源文件和生成文件同组；小组、低置信度组和相互依赖组应合并。执行器先验证计划和全部敏感文件，再在临时事务分支逐组运行暂存检查并提交。任一步失败时恢复原分支、原暂存区和全部工作区改动；全部成功后快进原分支并只推送一次。`-WhatIf -OutputFormat Json` 会在 `commitPlan` 返回规范化计划。
 
 提交前可独立查看风格分析结果：
 
