@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory)]
-  [ValidateSet("LocalBuild", "CommitPush", "Release")]
+  [ValidateSet("LocalBuild", "Ignore", "CommitPush", "Release")]
   [string]$Operation,
 
   [ValidatePattern('^v?\d+\.\d+\.\d+$')]
@@ -37,6 +37,11 @@ param(
   [ValidateRange(2, 8)]
   [int]$MaxCommits = 4,
 
+  [ValidateSet("Audit", "Apply", "ApplyAndUntrack")]
+  [string]$IgnoreMode = "Audit",
+
+  [string]$IgnorePlanPath,
+
   [ValidateSet("Human", "Json")]
   [string]$OutputFormat = "Human"
 )
@@ -47,6 +52,7 @@ $script:Utf8NoBom = [Text.UTF8Encoding]::new($false)
 $script:Stage = "Initialize"
 $setupScript = Join-Path $PSScriptRoot "setup-project.ps1"
 $releaseScript = Join-Path $PSScriptRoot "release.ps1"
+$ignoreScript = Join-Path $PSScriptRoot "ignore-audit.ps1"
 $utilsScript = Join-Path $PSScriptRoot "release-utils.ps1"
 
 if (-not (Test-Path -LiteralPath $utilsScript -PathType Leaf)) {
@@ -875,6 +881,38 @@ function Invoke-WhatIfPreview {
 function Invoke-Main {
   $script:Stage = "RepositoryCheck"
   Assert-RepositoryContext
+  if ($Operation -eq "Ignore") {
+    $script:Stage = "Ignore"
+    if (-not (Test-Path -LiteralPath $ignoreScript -PathType Leaf)) { throw "Ignore audit script missing: $ignoreScript" }
+    $mode = if ($WhatIf) { "Audit" } else { $IgnoreMode }
+    $ignoreArguments = @{
+      Mode = $mode
+      RepositoryRoot = $script:ResolvedRepositoryRoot
+      OutputFormat = "Json"
+      NoWritePlan = [bool]$WhatIf
+    }
+    if ($IgnorePlanPath) { $ignoreArguments.PlanPath = $IgnorePlanPath }
+    $output = & $ignoreScript @ignoreArguments
+    if ($LASTEXITCODE -ne 0) { throw "Ignore $mode failed" }
+    $result = (@($output) | Select-Object -Last 1) | ConvertFrom-Json
+    if ($OutputFormat -eq "Json") {
+      Write-OperationResult $result
+    }
+    elseif ($mode -eq "Audit") {
+      Write-Host "Ignore audit: $script:ResolvedRepositoryRoot"
+      foreach ($rule in @($result.plan.rules)) { Write-Host "Add: $($rule.pattern) - $($rule.reason)" }
+      foreach ($item in @($result.plan.review)) { Write-Host "Review: $($item.pattern) - $($item.reason)" }
+      foreach ($path in @($result.plan.untrackPaths)) { Write-Host "Tracked match: $path" }
+      foreach ($path in @($result.plan.sensitivePaths)) { Write-Host "Sensitive: $path" }
+      Write-Host "Plan: $($result.planPath)"
+    }
+    else {
+      Write-Host "Ignore $mode completed"
+      Write-Host "Rules added: $(@($result.rulesAdded).Count)"
+      Write-Host "Paths untracked: $(@($result.untrackedPaths).Count)"
+    }
+    return
+  }
   if ($WhatIf) {
     $script:Stage = "Plan"
     Write-Preview (Invoke-WhatIfPreview)

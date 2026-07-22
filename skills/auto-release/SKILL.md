@@ -1,11 +1,11 @@
 ---
 name: auto-release
-description: Detects and configures common application, library, native, mobile, desktop, and container repositories, then provides local test builds, style-aware single or grouped commit-and-push, formal GitHub releases, dry-run previews, and JSON results. Supports Tauri, Node.js, Go, Python, Rust, .NET, Java, CMake, Flutter, Android, Electron, and Docker. Use when the user asks to build a local test program without changing its version, analyze recent Git commit style, classify changes into coherent commits and push them together, preview release operations, create or validate release automation, generate a tag-triggered GitHub Actions workflow, or formally publish a semantic version such as v1.2.3.
+description: Detects and configures common application, library, native, mobile, desktop, and container repositories, then provides local test builds, deep .gitignore audits and safe rule completion, style-aware single or grouped commit-and-push, formal GitHub releases, dry-run previews, and JSON results. Supports Tauri, Node.js, Go, Python, Rust, .NET, Java, CMake, Flutter, Android, Electron, and Docker. Use when the user asks to build locally without changing version, inspect or complete Git ignore rules, stop tracking generated files without deleting them, classify changes into coherent commits and push them together, create release automation, or publish a semantic version such as v1.2.3.
 ---
 
 # Auto Release
 
-只执行 `.codex-release.json` 声明的项目步骤，不猜测或复用其他仓库的配置。用户未明确操作时，显示 `LocalBuild`、`CommitPush`、`Release` 三项选择；不得把“本地打包”解释为正式发布。
+只执行当前仓库声明的项目步骤，不猜测或复用其他仓库的配置。用户未明确操作时，显示 `LocalBuild`、`Ignore`、`CommitPush`、`Release` 四项选择；不得把“本地打包”解释为正式发布。用户只说“忽略”时选择 `Ignore Audit`，先展示计划，不直接修改。
 
 ## 初始化项目
 
@@ -58,7 +58,19 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $invoke -Operation Local
 
 默认先验证 `.git/auto-release/local-build.json` 的源码指纹和产物 SHA256，全部有效时直接复用；用户明确要求重新打包时传入 `-ForceRebuild`。生成配置优先使用快速本地命令：Tauri 不生成安装器，Python 只生成 wheel，Rust 执行 release build，.NET 执行 build，Electron 使用当前平台构建。只按完整路径终止当前配置产物或上次收据记录的 EXE，不得遍历并终止 `output` 中的无关程序。构建后只记录底层执行器返回的本次产物清单，清理上次由 Skill 管理但本次不再生成的旧输出；禁止因文件占用创建 `-2`、`-3` 等备用文件。状态文件不进入 Git，并兼容读取旧目录中的收据。
 
-### 2. CommitPush
+### 2. Ignore
+
+深度检查仓库并补全缺失的 Git 忽略规则。默认只审计：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $invoke -Operation Ignore -IgnoreMode Audit -RepositoryRoot "<仓库根目录>"
+```
+
+审计项目清单、根和嵌套 `.gitignore`、当前 tracked/untracked/ignored 状态、构建输出、缓存、IDE/OS 文件、敏感路径、受保护文件和历史生成路径；计划写入 `.git/auto-release/ignore-plan.json`。只有用户确认后才使用 `Apply`；只有明确要求保留本地文件并停止 Git 跟踪时才使用 `ApplyAndUntrack`。
+
+禁止把存在的凭据仅靠忽略隐藏，禁止删除本地文件，禁止宽泛执行 `git rm --cached .`，禁止自动重写历史。计划过期、托管标记异常、新规则隐藏锁文件/工作流或本地文件哈希变化时停止并回滚。完整行为见 [Ignore 参考](references/ignore.md)。本操作不提交或推送；需要时随后运行 `CommitPush`。
+
+### 3. CommitPush
 
 检查冲突和疑似密钥后，把更改区、暂存区、删除和未跟踪文件全部提交，并推送当前分支：
 
@@ -89,7 +101,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File $invoke `
 本操作明确允许等价于 `git add -A` 的全量暂存，但仍遵守 `.gitignore`；发现 `.env`、私钥、凭据文件或密钥内容时停止并恢复原暂存区。远程领先或分叉时停止，不自动合并或变基。
 即使 `.codex-release.json` 的发布分支与当前分支不同，也必须提交并推送当前分支；配置分支只约束正式 `Release`。
 
-### 3. Release
+### 4. Release
 
 正式发布要求稳定语义版本、符合仓库提交风格的单行中文总结和中文 Release Notes：
 

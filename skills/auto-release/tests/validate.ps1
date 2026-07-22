@@ -5,8 +5,10 @@ $script = Join-Path $root "scripts\release.ps1"
 $setupScript = Join-Path $root "scripts\setup-project.ps1"
 $invokeScript = Join-Path $root "scripts\invoke-release.ps1"
 $commitStyleScript = Join-Path $root "scripts\commit-style.ps1"
+$ignoreScript = Join-Path $root "scripts\ignore-audit.ps1"
 $utils = Join-Path $root "scripts\release-utils.ps1"
 $reference = Join-Path $root "references\config.md"
+$ignoreReference = Join-Path $root "references\ignore.md"
 $workflowTemplates = @(
   Join-Path $root "assets\workflows\tauri.yml"
   Join-Path $root "assets\workflows\node.yml"
@@ -74,7 +76,7 @@ function Write-TestUtf8([string]$Path, [string]$Content) {
   [IO.File]::WriteAllText($Path, $Content, [Text.UTF8Encoding]::new($false))
 }
 
-foreach ($path in @($script, $setupScript, $invokeScript, $commitStyleScript, $utils, $reference) + $workflowTemplates) {
+foreach ($path in @($script, $setupScript, $invokeScript, $commitStyleScript, $ignoreScript, $utils, $reference, $ignoreReference) + $workflowTemplates) {
   if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
     throw "Required skill file missing: $path"
   }
@@ -307,6 +309,71 @@ try {
 finally {
   Remove-TestDirectory $planRoot
   Remove-TestDirectory $bareRoot
+}
+
+$ignoreRoot = New-TestDirectory "ignore"
+try {
+  & git -C $ignoreRoot config user.name "Ignore Audit Test"
+  & git -C $ignoreRoot config user.email "ignore-audit@example.invalid"
+  Write-TestUtf8 (Join-Path $ignoreRoot "package.json") '{"name":"ignore-fixture","version":"1.0.0"}'
+  Write-TestUtf8 (Join-Path $ignoreRoot "package-lock.json") '{"name":"ignore-fixture","version":"1.0.0","lockfileVersion":3,"packages":{}}'
+  Write-TestUtf8 (Join-Path $ignoreRoot ".env.example") "API_URL=https://example.invalid`n"
+  Write-TestUtf8 (Join-Path $ignoreRoot ".gitignore") "node_modules/`n"
+  Write-TestUtf8 (Join-Path $ignoreRoot "previews\preview.html") "preview`n"
+  & git -C $ignoreRoot add package.json package-lock.json .env.example .gitignore previews/preview.html
+  & git -C $ignoreRoot commit -m "Initial ignore fixture" | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "ignore fixture commit failed" }
+  Write-TestUtf8 (Join-Path $ignoreRoot ".planning\notes.txt") "local planning`n"
+  Write-TestUtf8 (Join-Path $ignoreRoot "dist\app.js") "generated`n"
+
+  $ignoreAuditOutput = & $shell -NoProfile -ExecutionPolicy Bypass -File $invokeScript `
+    -Operation Ignore -IgnoreMode Audit -RepositoryRoot $ignoreRoot -OutputFormat Json
+  if ($LASTEXITCODE -ne 0) { throw "Ignore Audit process failed" }
+  $ignoreAudit = ($ignoreAuditOutput | Select-Object -Last 1) | ConvertFrom-Json
+  Assert-Equal $ignoreAudit.status "planned" "Ignore Audit returned the wrong status"
+  Assert-Match (@($ignoreAudit.plan.detectedProjectTypes) -join ',') 'node' "Ignore Audit did not detect Node.js"
+  Assert-Match (@($ignoreAudit.plan.rules.pattern) -join ',') '/previews/' "Ignore Audit did not recommend the local preview directory"
+  Assert-Match (@($ignoreAudit.plan.rules.pattern) -join ',') 'dist/' "Ignore Audit did not recommend Node.js build output"
+  Assert-Match (@($ignoreAudit.plan.rules.pattern) -join ',') '/\.planning/' "Ignore Audit did not recommend local planning state"
+  Assert-Match (@($ignoreAudit.plan.untrackPaths) -join ',') 'previews/preview\.html' "Ignore Audit did not report a tracked generated file"
+  Assert-Match (@($ignoreAudit.plan.protectedPaths) -join ',') 'package-lock\.json' "Ignore Audit did not protect the lock file"
+  Assert-Equal @($ignoreAudit.plan.sensitivePaths).Count 0 "Ignore Audit treated .env.example as a secret"
+  $previewHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $ignoreRoot "previews\preview.html")).Hash
+
+  $ignoreApplyOutput = & $shell -NoProfile -ExecutionPolicy Bypass -File $invokeScript `
+    -Operation Ignore -IgnoreMode ApplyAndUntrack -RepositoryRoot $ignoreRoot -OutputFormat Json
+  if ($LASTEXITCODE -ne 0) { throw "Ignore ApplyAndUntrack process failed" }
+  $ignoreApply = ($ignoreApplyOutput | Select-Object -Last 1) | ConvertFrom-Json
+  Assert-Equal $ignoreApply.status "succeeded" "Ignore ApplyAndUntrack returned the wrong status"
+  Assert-Match (Get-Content -Raw -Encoding UTF8 (Join-Path $ignoreRoot ".gitignore")) 'BEGIN Auto Release managed ignores' "Ignore Apply did not add the managed block"
+  if (-not (Test-Path -LiteralPath (Join-Path $ignoreRoot "previews\preview.html") -PathType Leaf)) { throw "Ignore untracking removed the local preview" }
+  Assert-Equal (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $ignoreRoot "previews\preview.html")).Hash $previewHash "Ignore untracking changed the local preview"
+  Assert-Match (git -C $ignoreRoot diff --cached --name-only) 'previews/preview\.html' "Ignore did not stage the tracked preview removal"
+  & git -C $ignoreRoot check-ignore -q --no-index -- dist/app.js
+  if ($LASTEXITCODE -ne 0) { throw "Ignore Apply did not ignore dist output" }
+  $envExampleRule = git -C $ignoreRoot check-ignore -v --no-index -- .env.example
+  Assert-Match ($envExampleRule -join [Environment]::NewLine) ':!\.env\.example\s' "Ignore Apply did not protect .env.example with a negative rule"
+  & git -C $ignoreRoot check-ignore -q --no-index -- package-lock.json
+  if ($LASTEXITCODE -eq 0) { throw "Ignore Apply hid package-lock.json" }
+
+  $secondAuditOutput = & $shell -NoProfile -ExecutionPolicy Bypass -File $invokeScript `
+    -Operation Ignore -IgnoreMode Audit -RepositoryRoot $ignoreRoot -OutputFormat Json
+  if ($LASTEXITCODE -ne 0) { throw "second Ignore Audit process failed" }
+  $ignoreTextBefore = Get-Content -Raw -Encoding UTF8 (Join-Path $ignoreRoot ".gitignore")
+  $secondApplyOutput = & $shell -NoProfile -ExecutionPolicy Bypass -File $invokeScript `
+    -Operation Ignore -IgnoreMode Apply -RepositoryRoot $ignoreRoot -OutputFormat Json
+  if ($LASTEXITCODE -ne 0) { throw "idempotent Ignore Apply process failed" }
+  $ignoreTextAfter = Get-Content -Raw -Encoding UTF8 (Join-Path $ignoreRoot ".gitignore")
+  Assert-Equal $ignoreTextAfter $ignoreTextBefore "Ignore Apply was not idempotent"
+
+  & $ignoreScript -Mode Audit -RepositoryRoot $ignoreRoot -OutputFormat Json | Out-Null
+  Write-TestUtf8 (Join-Path $ignoreRoot "changed-after-audit.txt") "changed`n"
+  Assert-Throws {
+    & $ignoreScript -Mode Apply -RepositoryRoot $ignoreRoot
+  } "fingerprint is stale" "Ignore Apply accepted a stale plan"
+}
+finally {
+  Remove-TestDirectory $ignoreRoot
 }
 
 $nodeRoot = New-TestDirectory "node"
@@ -1299,6 +1366,7 @@ Assert-Match $skill '`--force`' "missing force-push guard"
 Assert-Match $skill '`git add \.`' "missing staging guard"
 Assert-Match $skill 'Detect[\s\S]*Generate[\s\S]*Validate' "skill does not document project setup modes"
 Assert-Match $skill 'LocalBuild[\s\S]*CommitPush[\s\S]*Release' "skill does not document the three user operations"
+Assert-Match $skill 'LocalBuild[\s\S]*Ignore[\s\S]*CommitPush[\s\S]*Release' "skill does not document all four user operations"
 Assert-Match $referenceSource 'publish-draft' "config reference missing draft strategy"
 Assert-Match $referenceSource 'uploadAssets' "config reference missing upload assets"
 
@@ -1317,7 +1385,7 @@ if ($setupSource -match 'D:\\QiLin|CopyShare|suzeccc') {
   throw "generic setup script contains project-specific values"
 }
 $invokeSource = Get-Content -Raw -Encoding UTF8 $invokeScript
-Assert-Match $invokeSource 'ValidateSet\("LocalBuild", "CommitPush", "Release"\)' "unified operation entrypoint is incomplete"
+Assert-Match $invokeSource 'ValidateSet\("LocalBuild", "Ignore", "CommitPush", "Release"\)' "unified operation entrypoint is incomplete"
 Assert-Match $invokeSource 'git.*"add", "-A"|@\("add", "-A"\)' "CommitPush does not stage all changes"
 Assert-Match $invokeSource 'possible secret file' "CommitPush lacks secret path protection"
 Assert-Match $invokeSource 'sourceFingerprint' "Release lacks local build freshness tracking"
@@ -1328,6 +1396,12 @@ Assert-Match $invokeSource 'Assert-CommitSummaryStyle' "CommitPush does not enfo
 Assert-Match $invokeSource 'CommitStrategy.*AutoSplit' "CommitPush does not expose automatic multi-commit execution"
 Assert-Match $invokeSource 'auto-release/transaction-' "CommitPush does not use a transaction branch"
 Assert-Match $invokeSource 'Commit plan does not cover all changes' "CommitPush does not require exact plan coverage"
+Assert-Match $invokeSource 'ValidateSet\("Audit", "Apply", "ApplyAndUntrack"\)' "unified operation entrypoint does not expose Ignore modes"
+$ignoreSource = Get-Content -Raw -Encoding UTF8 $ignoreScript
+Assert-Match $ignoreSource 'BEGIN Auto Release managed ignores' "Ignore operation lacks a managed block"
+Assert-Match $ignoreSource 'worktree fingerprint is stale' "Ignore operation does not reject stale plans"
+Assert-Match $ignoreSource 'rm.*--cached' "Ignore operation cannot stop tracking generated files"
+Assert-Match $ignoreSource 'Restore-Index' "Ignore operation cannot restore the original index"
 Assert-Match $referenceSource 'Conventional Commits' "config reference does not document commit-style fallback"
 foreach ($template in $workflowTemplates) {
   $templateSource = Get-Content -Raw -Encoding UTF8 $template

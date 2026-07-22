@@ -44,6 +44,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\invoke-release
 # 单行 JSON 输出
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\invoke-release.ps1 -Operation LocalBuild -OutputFormat Json
 
+# 深度检查缺失的 Git ignore 规则；默认只读工作区
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\invoke-release.ps1 -Operation Ignore -IgnoreMode Audit
+
 # 提交更改区和暂存区的全部安全更改，并推送当前分支
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\invoke-release.ps1 -Operation CommitPush -Summary "一句中文总结"
 
@@ -58,6 +61,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\invoke-release
 ```
 
 `LocalBuild` 调用 `prepare.localCommands`，未声明时兼容回退到 `prepare.commands`；它不运行 `version.updates`，也不验证 GitHub 工作流的标签触发器、发布权限或草稿 Release。`prepare.bootstrapCommands` 根据 `prepare.bootstrapInputs` 的哈希缓存，输入未变化时不重复安装依赖。构建产物统一复制到 `prepare.localOutputDirectory`，默认是 `output`；目标文件使用 `<projectName><扩展名>`，不含版本号，目录或文件不存在时自动创建。
+
+`Ignore` 不依赖 `.codex-release.json`。`Audit`、`Apply`、`ApplyAndUntrack` 的计划结构、安全边界和回滚规则见 [`ignore.md`](ignore.md)。
 
 执行器只按完整路径终止配置产物和上次收据记录的 EXE，不扫描或终止输出目录中的无关程序。`prepare.localArtifacts` 控制本地快速构建产物，`prepare.artifacts` 控制正式构建产物；`prepare.localSearchRoots` 为无法提前确定完整文件名的本地产物提供受限搜索根目录。`localName` 可覆盖统一输出文件名。`prepare.localOutputDirectory` 必须是无版本、无标签占位符的稳定路径。草稿式 GitHub Release 的正式操作只把本地验证产物写入该规范目录，不采用 `artifacts[].destination` 中的版本路径；GitHub Actions 负责正式发布包。成功后在 `.git/auto-release/local-build.json` 保存忽略发布版本值的源文件指纹、底层执行器返回的精确产物清单和 SHA256，并删除上次由 Skill 管理、这次不再生成的旧输出。默认复用有效收据；`-ForceRebuild` 强制重新构建。正式发布提交前再次校验源码指纹，避免构建后变化的文件进入发布提交。
 
